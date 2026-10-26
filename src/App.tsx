@@ -677,7 +677,7 @@ function App() {
           !!item && typeof item === 'object'
           && 'name' in item && typeof item.name === 'string'
           && 'package_ids' in item && Array.isArray(item.package_ids)
-          && item.package_ids.every((id) => typeof id === 'string'),
+          && item.package_ids.every((id: unknown) => typeof id === 'string'),
         ).map((item) => {
           const packages = 'packages' in item && Array.isArray(item.packages)
             ? item.packages.filter((reference): reference is PackageReference =>
@@ -1559,6 +1559,7 @@ function ApplicationsPage({
                 <div><dt>Category</dt><dd>{selectedApp.category || 'Uncategorized'}</dd></div>
                 <div><dt>{selectedApp.source === 'WinGet' ? 'Package source' : 'Launcher file'}</dt><dd className="path-value" title={selectedApp.path}>{selectedApp.path}</dd></div>
               </dl>
+              <p className="action-note">The local launcher inventory does not consistently expose installed version, publisher, architecture, licence, or package size; unavailable metadata is not inferred.</p>
               <button className="primary-button launch-button" onClick={() => onLaunch(selectedApp)} type="button">
                 <span>▶</span> Launch application
               </button>
@@ -1782,23 +1783,34 @@ function ProcessesPage({ processes, loading, error, onStop, platform }: {
   onStop: (process: ProcessInfo) => void
   platform: string
 }) {
+  const [query, setQuery] = useState('')
+  const normalizedQuery = query.trim().toLowerCase()
+  const visibleProcesses = processes.filter((process) =>
+    process.name.toLowerCase().includes(normalizedQuery) || String(process.pid).includes(normalizedQuery),
+  )
   return (
     <>
       <PageHeading eyebrow="LIVE SYSTEM ACTIVITY" title="Processes" description={platform === 'windows'
         ? 'Processes visible to your account, with owner checks before a stop request is allowed.'
         : 'Processes currently visible to your user, read from the Linux /proc filesystem.'} />
       <section className="content-card">
-        <div className="list-heading"><div><h2>Running processes</h2><p>Resident memory is reported by the kernel.</p></div><span className="result-count">{loading ? '…' : processes.length}</span></div>
+        <div className="list-heading">
+          <div><h2>Running processes</h2><p>Resident memory is reported by the kernel.</p></div>
+          <label className="filter-search process-search"><span aria-hidden="true">⌕</span><input aria-label="Filter processes by name or PID" onChange={(event) => setQuery(event.target.value)} placeholder="Filter processes" type="search" value={query} /></label>
+          <span className="result-count">{loading ? '…' : visibleProcesses.length}</span>
+        </div>
         {loading ? <LoadingState label="Reading live process information…" /> : error ? (
           <EmptyState title="Process information is unavailable" description="Resolve the system access error above and refresh the scan." />
-        ) : processes.length === 0 ? (
-          <EmptyState title="No process information available" description={platform === 'windows' ? 'AppPilot could not read any process entries visible to your account.' : 'AppPilot could not read any process entries from /proc.'} />
+        ) : visibleProcesses.length === 0 ? (
+          <EmptyState title={normalizedQuery ? 'No matching processes' : 'No process information available'} description={normalizedQuery
+            ? 'Try a different process name or PID.'
+            : platform === 'windows' ? 'AppPilot could not read any process entries visible to your account.' : 'AppPilot could not read any process entries from /proc.'} />
         ) : (
           <div className="process-table-wrap">
             <table className="process-table">
               <thead><tr><th>Process</th><th>PID</th><th>Memory (RSS)</th><th>Action</th></tr></thead>
               <tbody>
-                {processes.slice(0, 150).map((process) => (
+                {visibleProcesses.slice(0, 150).map((process) => (
                   <tr key={process.pid}>
                     <td><span className="process-name"><i />{process.name}</span></td>
                     <td className="numeric-cell">{process.pid}</td>
@@ -1808,7 +1820,7 @@ function ProcessesPage({ processes, loading, error, onStop, platform }: {
                 ))}
               </tbody>
             </table>
-            {processes.length > 150 ? <p className="table-footnote">Showing the 150 processes with the highest resident memory out of {processes.length}.</p> : null}
+            {visibleProcesses.length > 150 ? <p className="table-footnote">Showing the 150 processes with the highest resident memory out of {visibleProcesses.length} matches.</p> : null}
           </div>
         )}
       </section>
@@ -1974,7 +1986,7 @@ function ToolsPage({
         </section>
 
         <section className="content-card tool-card">
-          <div className="list-heading"><div><h2>Deferred updates</h2><p>Hidden from the update list on this device until restored.</p></div><span className="result-count">{ignoredUpdates.length}</span></div>
+          <div className="list-heading"><div><h2>Deferred updates</h2><p>Hidden locally until restored; this does not change a package manager hold or pin.</p></div><span className="result-count">{ignoredUpdates.length}</span></div>
           {ignoredUpdates.length ? <div className="collection-list">{ignoredUpdates.map((id) => (
             <div className="integration-row" key={id}><span>{id}</span><button className="text-button" onClick={() => onUnignore(id)} type="button">Restore</button></div>
           ))}</div> : <p className="tool-footnote">No updates have been deferred.</p>}

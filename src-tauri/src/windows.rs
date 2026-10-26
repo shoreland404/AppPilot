@@ -169,7 +169,7 @@ async fn get_package_cache_status() -> Result<PackageCacheStatus, String> {
 
 #[tauri::command]
 async fn get_system_diagnostics() -> Result<SystemDiagnostics, String> {
-    let winget_available = find_winget().is_some();
+    let winget_available = detect_package_managers().winget;
     let version_output = Command::new("powershell.exe")
         .args([
             "-NoProfile",
