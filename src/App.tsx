@@ -1986,7 +1986,8 @@ function ToolsPage({
         </section>
 
         <section className="content-card tool-card">
-          <div className="list-heading"><div><h2>Deferred updates</h2><p>Hidden locally until restored; this does not change a package manager hold or pin.</p></div><span className="result-count">{ignoredUpdates.length}</span></div>
+          <div className="list-heading"><div><h2>Deferred updates</h2><p>Hidden locally until restored; this does not change a package-manager hold or pin.</p></div><span className="result-count">{ignoredUpdates.length}</span></div>
+          <p className="tool-footnote">For a system-wide hold, pin, or lock, use the native controls documented by that package manager. AppPilot never changes those policies when you defer an update.</p>
           {ignoredUpdates.length ? <div className="collection-list">{ignoredUpdates.map((id) => (
             <div className="integration-row" key={id}><span>{id}</span><button className="text-button" onClick={() => onUnignore(id)} type="button">Restore</button></div>
           ))}</div> : <p className="tool-footnote">No updates have been deferred.</p>}

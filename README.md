@@ -14,6 +14,7 @@ AppPilot is a native desktop application manager for Linux and Windows, built wi
 - Estimates selected Linux package-cache directories and cleans them only through the package manager's own command. WinGet cache cleanup is explicitly unsupported.
 - Exports a small diagnostics summary containing OS/provider information only; it omits personal paths, logs, and package history.
 - Offers opt-in update reminders while AppPilot is open. Reminders never install packages and are not scheduled by the operating system.
+- Update deferrals hide items only inside AppPilot. Persistent holds, pins, or locks remain under the package manager's native controls and are never changed by a deferral.
 - Provides a first-run guide, keyboard search (`Ctrl+K` or `/`), a system-aware theme default, and a persistent compact library layout.
 - Keeps application data and preferences on the device. AppPilot has no telemetry.
 
