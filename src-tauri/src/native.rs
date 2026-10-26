@@ -1217,62 +1217,59 @@ fn perform_package_action_impl(app_id: String, action: String) -> Result<String,
         }
     }
 
-    #[tauri::command]
-    async fn reinstall_package(app_id: String) -> Result<String, String> {
-        tauri::async_runtime::spawn_blocking(move || reinstall_package_impl(app_id))
-            .await
-            .map_err(|error| format!("package reinstall task failed: {error}"))?
-    }
-
-    fn reinstall_package_impl(app_id: String) -> Result<String, String> {
-        let app = scan_applications_uncached()?
-            .into_iter()
-            .find(|entry| entry.id == app_id)
-            .ok_or_else(|| {
-                "application is no longer installed; refresh and try again.".to_string()
-            })?;
-        let package_name = app
-            .package_name
-            .as_deref()
-            .filter(|name| valid_package_id(name))
-            .ok_or_else(|| format!("AppPilot cannot verify the package for {}.", app.name))?;
-
-        match app.source.as_str() {
-            APT_SOURCE => run_privileged_command(
-                "pkexec",
-                &["apt-get", "install", "--reinstall", "-y", "--", package_name],
-            )?,
-            DNF_SOURCE => run_privileged_command(
-                "pkexec",
-                &["dnf", "reinstall", "-y", "--", package_name],
-            )?,
-            PACMAN_SOURCE => run_privileged_command(
-                "pkexec",
-                &["pacman", "-S", "--noconfirm", "--", package_name],
-            )?,
-            ZYPPER_SOURCE => run_privileged_command(
-                "pkexec",
-                &[
-                    "zypper",
-                    "--non-interactive",
-                    "install",
-                    "--force",
-                    "--",
-                    package_name,
-                ],
-            )?,
-            source => {
-                return Err(format!(
-                    "Reinstall is not supported for {source}; AppPilot cannot safely target only this package with that provider."
-                ))
-            }
-        }
-        invalidate_application_cache()?;
-        Ok(format!("{} was reinstalled.", app.name))
-    }
-
     invalidate_application_cache()?;
     Ok(format!("{} was removed successfully.", app.name))
+}
+
+#[tauri::command]
+async fn reinstall_package(app_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || reinstall_package_impl(app_id))
+        .await
+        .map_err(|error| format!("package reinstall task failed: {error}"))?
+}
+
+fn reinstall_package_impl(app_id: String) -> Result<String, String> {
+    let app = scan_applications_uncached()?
+        .into_iter()
+        .find(|entry| entry.id == app_id)
+        .ok_or_else(|| "application is no longer installed; refresh and try again.".to_string())?;
+    let package_name = app
+        .package_name
+        .as_deref()
+        .filter(|name| valid_package_id(name))
+        .ok_or_else(|| format!("AppPilot cannot verify the package for {}.", app.name))?;
+
+    match app.source.as_str() {
+        APT_SOURCE => run_privileged_command(
+            "pkexec",
+            &["apt-get", "install", "--reinstall", "-y", "--", package_name],
+        )?,
+        DNF_SOURCE => {
+            run_privileged_command("pkexec", &["dnf", "reinstall", "-y", "--", package_name])?
+        }
+        PACMAN_SOURCE => run_privileged_command(
+            "pkexec",
+            &["pacman", "-S", "--noconfirm", "--", package_name],
+        )?,
+        ZYPPER_SOURCE => run_privileged_command(
+            "pkexec",
+            &[
+                "zypper",
+                "--non-interactive",
+                "install",
+                "--force",
+                "--",
+                package_name,
+            ],
+        )?,
+        source => {
+            return Err(format!(
+                "Reinstall is not supported for {source}; AppPilot cannot safely target only this package with that provider."
+            ))
+        }
+    }
+    invalidate_application_cache()?;
+    Ok(format!("{} was reinstalled.", app.name))
 }
 
 #[tauri::command]
