@@ -2,6 +2,16 @@
 
 Notable changes to AppPilot are recorded here.
 
+## Unreleased
+
+- Expanded Linux package-source detection and live search to APT, DNF, Pacman, Zypper, Flatpak, and Snap; WinGet remains the Windows provider.
+- Added selected updates, per-package operation progress, local transaction history, update deferrals, and confirmed bulk removal.
+- Added exact-package reinstall for APT, DNF, Pacman, Zypper, and WinGet; rollback remains unavailable unless a provider can verify a target version.
+- Added portable setup manifests, confirmed restore queues, named favorite collections, and preferences import/export.
+- Added Linux package-cache estimates and package-manager-owned cleanup with explicit confirmation; WinGet cleanup is reported as unsupported.
+- Added read-only system diagnostics and a privacy-reviewed export that excludes personal paths, logs, and package history.
+- Added optional update reminders while AppPilot is open; reminders do not use OS scheduling and never install packages automatically.
+
 ## 0.2.0
 
 - Added a Windows native backend for WinGet inventory, live search, exact current-user installs, per-app and grouped updates, verified package removal, and Start menu launching.

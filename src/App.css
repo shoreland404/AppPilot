@@ -866,12 +866,9 @@
   width: 100%;
   min-width: 0;
   gap: 10px;
-  padding: 9px;
+  padding: 4px 7px;
   border: 1px solid transparent;
   border-radius: 9px;
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
   transition: border-color 120ms ease, background 120ms ease;
 }
 
@@ -882,6 +879,52 @@
 .application-row.selected {
   border-color: rgba(124, 154, 244, 0.15);
   background: var(--accent-wash);
+}
+
+.application-row-select {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  flex: 1;
+  gap: 10px;
+  padding: 5px 2px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.application-row > input,
+.bulk-removal-toolbar input {
+  accent-color: var(--accent);
+}
+
+.bulk-removal-toolbar {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.bulk-removal-toolbar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bulk-removal-toolbar [role="status"] {
+  flex-basis: 100%;
 }
 
 .favorites-filter,
@@ -1856,6 +1899,183 @@
 :root[data-theme='light'] .banner-kicker {
   color: var(--accent);
   font-size: 10px;
+}
+
+.tools-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.tool-card {
+  min-width: 0;
+  padding: 20px;
+}
+
+.tool-card .list-heading h2 {
+  font-size: 16px;
+}
+
+.tool-card .list-heading p,
+.tool-footnote {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.tool-actions,
+.collection-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+  margin-top: 15px;
+}
+
+.file-button {
+  position: relative;
+  overflow: hidden;
+}
+
+.file-button input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.collection-form input,
+.reminder-setting select {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--panel-raised);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.collection-form input {
+  flex: 1;
+  min-width: 150px;
+}
+
+.manifest-preview {
+  padding: 14px;
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel-raised);
+}
+
+.manifest-preview > strong {
+  font-size: 13px;
+}
+
+.manifest-preview > p,
+.manifest-item small,
+.tool-subline {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.manifest-items,
+.collection-list,
+.integration-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.manifest-item,
+.updates-select-all {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.manifest-item > span:first-child {
+  display: grid;
+  min-width: 0;
+}
+
+.manifest-item > span:first-child strong {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+}
+
+.reminder-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 15px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.tool-footnote {
+  margin: 12px 0 0;
+}
+
+.tool-subline {
+  font-weight: 400;
+}
+
+.cache-total {
+  display: flex;
+  justify-content: space-between;
+  padding-top: 11px;
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.cache-clean-button {
+  margin-top: 14px;
+}
+
+.updates-select-all {
+  padding: 11px 14px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.updates-select-all label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-row > input[type='checkbox'],
+.updates-select-all input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.operation-progress {
+  padding: 10px 13px;
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--accent-wash);
+  color: var(--text);
+  font-size: 12px;
+}
+
+@media (max-width: 900px) {
+  .tools-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .banner-button {

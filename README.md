@@ -4,12 +4,16 @@ AppPilot is a native desktop application manager for Linux and Windows, built wi
 
 ## What it does
 
-- **15 everyday capabilities:** system overview; installed-app library; instant library search; source/category filters; favourites; alphabetical sorting; one-click filter reset; application details; desktop launching; Flatpak/WinGet discovery; package installation; individual updates; grouped updates; verified removal; and startup/process controls.
-- **Linux:** discovers desktop launchers and package ownership from XDG, APT, Flatpak, and Snap; launches apps through the desktop; browses configured Flatpak remotes; installs, updates, and removes packages when identity can be verified.
+- **20+ practical capabilities:** system overview; installed-app library; instant search; source/category filters; favourites and collections; alphabetical sorting; application details; desktop launching; multi-provider discovery; package installation; selected and grouped updates; confirmed bulk removal; provider-aware reinstall; local action history; update deferrals; manifests and restore queues; cache insights; diagnostics export; and startup/process controls.
+- **Linux:** discovers desktop launchers and package ownership from XDG, APT, DNF, Pacman, Zypper, Flatpak, and Snap where installed; searches available providers together; and performs package actions only when local package identity can be verified.
 - **Windows:** discovers WinGet-managed apps, searches the live WinGet catalogue, installs exact package IDs for the current user, checks and applies individual or grouped updates, uninstalls exact package IDs, and opens matching Start menu shortcuts.
 - Reads and manages user-owned startup entries (Linux XDG entries and Windows Startup-folder shortcuts).
 - Shows processes visible to the current user and only offers stop actions after checking process ownership.
 - Saves favourites, filters by source and category, sorts the library, and offers a one-click way to clear filters.
+- Exports/imports portable package manifests and preferences; restore queues show exact sources and install scopes and require confirmation before any package action.
+- Estimates selected Linux package-cache directories and cleans them only through the package manager's own command. WinGet cache cleanup is explicitly unsupported.
+- Exports a small diagnostics summary containing OS/provider information only; it omits personal paths, logs, and package history.
+- Offers opt-in update reminders while AppPilot is open. Reminders never install packages and are not scheduled by the operating system.
 - Provides a first-run guide, keyboard search (`Ctrl+K` or `/`), a system-aware theme default, and a persistent compact library layout.
 - Keeps application data and preferences on the device. AppPilot has no telemetry.
 
@@ -21,7 +25,7 @@ WinGet installs are restricted to the current user. Package names and IDs are pa
 
 ### Linux requirements
 
-The Linux build targets x86_64 and uses GTK 3, WebKitGTK 4.1, XDG desktop entries, `/proc`, APT, Flatpak, Snap, and `pkexec` where available. Package actions are offered only when AppPilot can verify the local package identity.
+The Linux build targets x86_64 and uses GTK 3, WebKitGTK 4.1, XDG desktop entries, `/proc`, the detected package managers, and `pkexec` where available. Package actions are offered only when AppPilot can verify the local package identity. Provider capabilities differ: reinstall is available only for APT, DNF, Pacman, and Zypper; rollback is not offered unless a provider exposes a verifiable target version.
 
 ## Performance and accessibility
 

@@ -5,6 +5,9 @@ import './App.css'
 
 type PackageStatus = {
   apt: boolean
+  dnf: boolean
+  pacman: boolean
+  zypper: boolean
   flatpak: boolean
   snap: boolean
   pkexec: boolean
@@ -59,6 +62,56 @@ type PackageUpdate = {
   version: string
 }
 
+type PackageCacheEntry = {
+  source: string
+  path: string
+  bytes: number
+}
+
+type PackageCacheStatus = {
+  supported: boolean
+  message: string
+  entries: PackageCacheEntry[]
+  total_bytes: number
+}
+
+type SystemDiagnostics = {
+  platform: string
+  distribution: string
+  release: string
+  kernel: string | null
+  architecture: string
+  package_sources: string[]
+  notices: string[]
+}
+
+type ActivityItem = {
+  id: string
+  timestamp: string
+  action: string
+  target: string
+  source: string
+  successful: boolean
+}
+
+type SetupManifest = {
+  schema_version: 1
+  created_at: string
+  packages: PackageReference[]
+}
+
+type PackageReference = {
+  name: string
+  id: string
+  source: string
+}
+
+type AppCollection = {
+  name: string
+  package_ids: string[]
+  packages?: PackageReference[]
+}
+
 type FlatpakCatalogEntry = {
   app_id: string
   name: string
@@ -69,7 +122,7 @@ type FlatpakCatalogEntry = {
   installed: boolean
 }
 
-type Page = 'Overview' | 'Discover' | 'Applications' | 'Updates' | 'Startup apps' | 'Processes' | 'Settings' | 'About'
+type Page = 'Overview' | 'Discover' | 'Applications' | 'Updates' | 'Startup apps' | 'Processes' | 'Tools' | 'Settings' | 'About'
 
 const navigation: { label: Page; icon: string }[] = [
   { label: 'Overview', icon: '◫' },
@@ -78,6 +131,7 @@ const navigation: { label: Page; icon: string }[] = [
   { label: 'Updates', icon: '↻' },
   { label: 'Startup apps', icon: '◷' },
   { label: 'Processes', icon: '⌘' },
+  { label: 'Tools', icon: '⇧' },
 ]
 
 const utilityNavigation: { label: Page; icon: string }[] = [
@@ -119,10 +173,31 @@ function getInitialFavorites(): string[] {
   }
 }
 
+function readLocalJson<T>(key: string, fallback: T): T {
+  const saved = localStorage.getItem(key)
+  if (!saved) return fallback
+  try {
+    return JSON.parse(saved) as T
+  } catch {
+    return fallback
+  }
+}
+
+function updateId(update: PackageUpdate) {
+  return `${update.source}:${update.package_name}`
+}
+
 function formatMemory(memoryKb: number) {
   if (memoryKb >= 1024 * 1024) return `${(memoryKb / 1024 / 1024).toFixed(1)} GB`
   if (memoryKb >= 1024) return `${(memoryKb / 1024).toFixed(0)} MB`
   return `${memoryKb} KB`
+}
+
+function formatBytes(bytes: number) {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(0)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${bytes} B`
 }
 
 function App() {
@@ -131,6 +206,15 @@ function App() {
   const [overview, setOverview] = useState<Overview | null>(null)
   const [apps, setApps] = useState<AppRecord[]>([])
   const [updates, setUpdates] = useState<PackageUpdate[]>([])
+  const [cacheStatus, setCacheStatus] = useState<PackageCacheStatus | null>(null)
+  const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null)
+  const [selectedUpdates, setSelectedUpdates] = useState<string[]>([])
+  const [selectedRemovalIds, setSelectedRemovalIds] = useState<string[]>([])
+  const [ignoredUpdates, setIgnoredUpdates] = useState<string[]>(() => readLocalJson('apppilot-ignored-updates', []))
+  const [activity, setActivity] = useState<ActivityItem[]>(() => readLocalJson('apppilot-activity', []))
+  const [collections, setCollections] = useState<AppCollection[]>(() => readLocalJson('apppilot-collections', []))
+  const [importedManifest, setImportedManifest] = useState<SetupManifest | null>(null)
+  const [reminderDays, setReminderDays] = useState<number>(() => Number(localStorage.getItem('apppilot-reminder-days') ?? 0))
   const [catalog, setCatalog] = useState<FlatpakCatalogEntry[]>([])
   const [startupEntries, setStartupEntries] = useState<StartupEntry[]>([])
   const [processes, setProcesses] = useState<ProcessInfo[]>([])
@@ -151,6 +235,7 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
+  const [operationProgress, setOperationProgress] = useState<string | null>(null)
   const platform = overview?.platform ?? 'linux'
   const catalogSearchSequence = useRef(0)
 
@@ -172,6 +257,33 @@ function App() {
     localStorage.setItem('apppilot-sort-order', sortOrder)
   }, [sortOrder])
 
+  useEffect(() => {
+    localStorage.setItem('apppilot-ignored-updates', JSON.stringify(ignoredUpdates))
+  }, [ignoredUpdates])
+
+  useEffect(() => {
+    localStorage.setItem('apppilot-activity', JSON.stringify(activity.slice(0, 100)))
+  }, [activity])
+
+  useEffect(() => {
+    localStorage.setItem('apppilot-collections', JSON.stringify(collections))
+  }, [collections])
+
+  useEffect(() => {
+    localStorage.setItem('apppilot-reminder-days', String(reminderDays))
+    if (reminderDays < 1) return
+    const dueAt = Number(localStorage.getItem('apppilot-next-reminder') ?? 0)
+    const delay = Math.max(0, dueAt - Date.now())
+    const timer = window.setTimeout(() => {
+      setNotice('Your optional update reminder is due. Open Updates to review available changes; AppPilot will not install anything automatically.')
+      localStorage.setItem('apppilot-next-reminder', String(Date.now() + reminderDays * 24 * 60 * 60 * 1000))
+    }, delay || reminderDays * 24 * 60 * 60 * 1000)
+    if (!dueAt) {
+      localStorage.setItem('apppilot-next-reminder', String(Date.now() + reminderDays * 24 * 60 * 60 * 1000))
+    }
+    return () => window.clearTimeout(timer)
+  }, [reminderDays])
+
   const loadOverview = useCallback(async () => {
     try {
       const dashboard = await invoke<Dashboard>('get_dashboard_data')
@@ -192,7 +304,7 @@ function App() {
     if (!nativeRuntime || page === 'Overview' || page === 'Applications' || page === 'Settings' || page === 'About') return
     try {
       if (page === 'Discover') {
-        if (platform === 'windows') {
+        if (catalogQuery.trim().length >= 2) {
           setCatalog([])
         } else {
           setCatalog(await invoke<FlatpakCatalogEntry[]>('list_flatpak_catalog'))
@@ -207,6 +319,17 @@ function App() {
         const items = await invoke<ProcessInfo[]>('scan_running_processes')
         setProcesses(items)
         setOverview((current) => current ? { ...current, running_processes: items.length } : current)
+      } else if (page === 'Tools') {
+        const [cache, system] = await Promise.allSettled([
+          invoke<PackageCacheStatus>('get_package_cache_status'),
+          invoke<SystemDiagnostics>('get_system_diagnostics'),
+        ])
+        const failures: string[] = []
+        if (cache.status === 'fulfilled') setCacheStatus(cache.value)
+        else failures.push(`Package cache scan: ${getErrorMessage(cache.reason)}`)
+        if (system.status === 'fulfilled') setDiagnostics(system.value)
+        else failures.push(`System diagnostics: ${getErrorMessage(system.reason)}`)
+        if (failures.length) setError(failures.join('\n'))
       }
       setError(null)
       setLastRefresh(new Date())
@@ -215,7 +338,7 @@ function App() {
     } finally {
       setPageLoading(false)
     }
-  }, [nativeRuntime, page, platform])
+  }, [catalogQuery, nativeRuntime, page])
 
   // Native inventory is an external system effect; browser-only mode never calls its IPC commands.
   useEffect(() => {
@@ -225,16 +348,16 @@ function App() {
 
   // Page data is fetched only after a native navigation target becomes active.
   useEffect(() => {
-    if (page === 'Discover' && platform === 'windows') {
-      return
+    if (page === 'Discover') {
+      if (platform === 'windows' || catalogQuery.trim().length >= 2) return
     }
-    const delay = page === 'Discover' ? 300 : 0
+    const delay = 0
     const timer = window.setTimeout(() => void loadCurrentPage(), delay)
     return () => window.clearTimeout(timer)
   }, [catalogQuery, loadCurrentPage, page, platform])
 
   useEffect(() => {
-    if (!nativeRuntime || platform !== 'windows' || page !== 'Discover') return
+    if (!nativeRuntime || page !== 'Discover') return
     if (catalogQuery.trim().length < 2) {
       return
     }
@@ -302,6 +425,9 @@ function App() {
     ? [{ name: 'WinGet', available: overview?.package_status.winget ?? false }]
     : [
       { name: 'APT', available: overview?.package_status.apt ?? false },
+      { name: 'DNF', available: overview?.package_status.dnf ?? false },
+      { name: 'Pacman', available: overview?.package_status.pacman ?? false },
+      { name: 'Zypper', available: overview?.package_status.zypper ?? false },
       { name: 'Flatpak', available: overview?.package_status.flatpak ?? false },
       { name: 'Snap', available: overview?.package_status.snap ?? false },
     ]
@@ -315,6 +441,328 @@ function App() {
     setFavoriteAppIds((current) => current.includes(appId)
       ? current.filter((id) => id !== appId)
       : [...current, appId])
+  }
+
+  const recordActivity = (action: string, target: string, source: string, successful: boolean) => {
+    setActivity((current) => [{
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      action,
+      target,
+      source,
+      successful,
+    }, ...current].slice(0, 100))
+  }
+
+  const exportSetupManifest = (onlyFavorites = false) => {
+    const selected = apps.filter((app) =>
+      app.package_name
+      && app.source !== 'Local'
+      && app.source !== 'System'
+      && (!onlyFavorites || favoriteAppIds.includes(app.id)),
+    )
+    const manifest: SetupManifest = {
+      schema_version: 1,
+      created_at: new Date().toISOString(),
+      packages: selected.map((app) => ({
+        name: app.name,
+        id: app.package_name ?? app.id,
+        source: app.source,
+      })),
+    }
+    const url = URL.createObjectURL(new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'apppilot-setup.json'
+    link.click()
+    URL.revokeObjectURL(url)
+    setNotice(`Exported ${manifest.packages.length} package references. No application files or personal data were included.`)
+  }
+
+  const importSetupManifest = async (file: File) => {
+    try {
+      const raw: unknown = JSON.parse(await file.text())
+      if (
+        !raw
+        || typeof raw !== 'object'
+        || !('schema_version' in raw)
+        || raw.schema_version !== 1
+        || !('packages' in raw)
+        || !Array.isArray(raw.packages)
+      ) {
+        throw new Error('This is not a supported AppPilot setup manifest.')
+      }
+      const packages = raw.packages.filter((item): item is SetupManifest['packages'][number] =>
+        !!item
+        && typeof item === 'object'
+        && 'name' in item && typeof item.name === 'string'
+        && 'id' in item && typeof item.id === 'string'
+        && /^[A-Za-z0-9][A-Za-z0-9.+_-]*$/.test(item.id)
+        && 'source' in item && typeof item.source === 'string',
+      )
+      if (packages.length !== raw.packages.length) {
+        throw new Error('The manifest contains invalid package entries and was not imported.')
+      }
+      setImportedManifest({
+        schema_version: 1,
+        created_at: 'created_at' in raw && typeof raw.created_at === 'string' ? raw.created_at : '',
+        packages,
+      })
+      setError(null)
+      setNotice(`Loaded ${packages.length} package references. Review their availability before restoring anything.`)
+    } catch (importError) {
+      setError(getErrorMessage(importError))
+      setNotice(null)
+    }
+  }
+
+  const findManifestPackage = async (packageId: string) => {
+    try {
+      setPageLoading(true)
+      const entries = await invoke<FlatpakCatalogEntry[]>('search_package_catalog', { query: packageId })
+      setCatalog(entries.filter((entry) => entry.app_id.toLowerCase() === packageId.toLowerCase()))
+      setCatalogQuery(packageId)
+      setPage('Discover')
+      setError(null)
+      setNotice(`Showing exact catalogue matches for ${packageId}. Review the source and confirm installation there.`)
+    } catch (searchError) {
+      setError(getErrorMessage(searchError))
+    } finally {
+      setPageLoading(false)
+    }
+  }
+
+  const installPackageReferences = async (packages: PackageReference[], label: string) => {
+    const candidates: { reference: PackageReference; entry: FlatpakCatalogEntry }[] = []
+    const unavailable: string[] = []
+    const alreadyInstalled: string[] = []
+    for (const reference of packages) {
+      const installedLocally = apps.some((app) =>
+        app.package_name?.toLowerCase() === reference.id.toLowerCase()
+        && (reference.source === 'Flatpak' || app.source === reference.source),
+      )
+      if (installedLocally) {
+        alreadyInstalled.push(reference.name)
+        continue
+      }
+      try {
+        const results = await invoke<FlatpakCatalogEntry[]>('search_package_catalog', { query: reference.id })
+        const matches = results.filter((entry) =>
+          entry.app_id.toLowerCase() === reference.id.toLowerCase()
+          && (reference.source === 'Flatpak' || entry.remote === reference.source),
+        )
+        if (matches.length === 1 && matches[0].installed) alreadyInstalled.push(reference.name)
+        else if (matches.length === 1) candidates.push({ reference, entry: matches[0] })
+        else unavailable.push(matches.length === 0
+          ? `${reference.name} (${reference.source}): unavailable`
+          : `${reference.name} (${reference.source}): multiple sources/scopes; choose it manually in Discover`)
+      } catch (searchError) {
+        unavailable.push(`${reference.name}: ${getErrorMessage(searchError)}`)
+      }
+    }
+    if (candidates.length === 0) {
+      setNotice(`${label}: nothing could be queued. Already installed: ${alreadyInstalled.length}; unavailable or ambiguous: ${unavailable.length}.`)
+      setError(unavailable.length ? unavailable.join('\n') : null)
+      return
+    }
+    const preview = candidates.map(({ reference, entry }) =>
+      `${reference.name} → ${entry.remote} (${entry.scope === 'user' ? 'current user' : 'system-wide'})`,
+    ).join('\n')
+    const omitted = unavailable.length
+      ? `\n\nNot queued (${unavailable.length}):\n${unavailable.join('\n')}`
+      : ''
+    if (!window.confirm(`Review ${candidates.length} package(s) for ${label}:\n\n${preview}${omitted}\n\nNothing is installed unless you confirm this queue.`)) return
+    setBulkUpdating(true)
+    const failures: string[] = []
+    for (const [index, { reference, entry }] of candidates.entries()) {
+      setOperationProgress(`Installing ${index + 1} of ${candidates.length}: ${reference.name}`)
+      try {
+        await invoke<string>('install_flatpak_application', {
+          appId: entry.app_id,
+          remote: entry.remote,
+          scope: entry.scope,
+        })
+        recordActivity('Installed', reference.name, entry.remote, true)
+      } catch (installError) {
+        failures.push(`${reference.name}: ${getErrorMessage(installError)}`)
+        recordActivity('Install failed', reference.name, entry.remote, false)
+      }
+    }
+    setBulkUpdating(false)
+    setOperationProgress(null)
+    setNotice(`${candidates.length - failures.length} of ${candidates.length} queued package(s) installed. Already installed: ${alreadyInstalled.length}; unavailable or ambiguous: ${unavailable.length}.`)
+    setError([...unavailable, ...failures].length ? [...unavailable, ...failures].join('\n') : null)
+    await loadOverview()
+  }
+
+  const installManifest = (manifest: SetupManifest) => installPackageReferences(manifest.packages, 'this setup manifest')
+  const installCollection = (collection: AppCollection) => {
+    const packages = collection.packages ?? collection.package_ids.map((id) => ({
+      id,
+      name: id,
+      source: apps.find((app) => app.package_name === id)?.source ?? '',
+    }))
+    return installPackageReferences(packages, `collection “${collection.name}”`)
+  }
+
+  const saveFavoriteCollection = (name: string) => {
+    const packages = apps
+      .filter((app) => favoriteAppIds.includes(app.id) && app.package_name)
+      .map((app) => ({
+        name: app.name,
+        id: app.package_name ?? app.id,
+        source: app.source,
+      }))
+    if (!name.trim() || packages.length === 0) return
+    setCollections((current) => [
+      ...current.filter((collection) => collection.name !== name.trim()),
+      { name: name.trim(), package_ids: packages.map((item) => item.id), packages },
+    ])
+    setNotice(`Saved “${name.trim()}” with ${packages.length} package references.`)
+  }
+
+  const exportPreferences = () => {
+    const preferences = {
+      schema_version: 1,
+      theme,
+      compactMode,
+      favoriteAppIds,
+      collections,
+    }
+    const url = URL.createObjectURL(new Blob([JSON.stringify(preferences, null, 2)], { type: 'application/json' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'apppilot-preferences.json'
+    link.click()
+    URL.revokeObjectURL(url)
+    setNotice('Exported AppPilot preferences and collections to a local file.')
+  }
+
+  const exportDiagnostics = () => {
+    if (!diagnostics) return
+    const report = {
+      schema_version: 1,
+      generated_at: new Date().toISOString(),
+      platform: diagnostics.platform,
+      distribution: diagnostics.distribution,
+      release: diagnostics.release,
+      kernel: diagnostics.kernel,
+      architecture: diagnostics.architecture,
+      package_sources: diagnostics.package_sources,
+      notices: diagnostics.notices,
+    }
+    const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'apppilot-diagnostics.json'
+    link.click()
+    URL.revokeObjectURL(url)
+    setNotice('Exported a privacy-reviewed diagnostics summary without personal paths, logs, or package history.')
+  }
+
+  const importPreferences = async (file: File) => {
+    try {
+      const raw: unknown = JSON.parse(await file.text())
+      if (!raw || typeof raw !== 'object' || !('schema_version' in raw) || raw.schema_version !== 1) {
+        throw new Error('This is not a supported AppPilot preferences file.')
+      }
+      if ('theme' in raw && (raw.theme === 'dark' || raw.theme === 'light')) setTheme(raw.theme)
+      if ('compactMode' in raw && typeof raw.compactMode === 'boolean') setCompactMode(raw.compactMode)
+      if ('favoriteAppIds' in raw && Array.isArray(raw.favoriteAppIds)
+        && raw.favoriteAppIds.every((id) => typeof id === 'string')) {
+        setFavoriteAppIds(raw.favoriteAppIds)
+      }
+      if ('collections' in raw && Array.isArray(raw.collections)) {
+        const validCollections = raw.collections.filter((item): item is AppCollection =>
+          !!item && typeof item === 'object'
+          && 'name' in item && typeof item.name === 'string'
+          && 'package_ids' in item && Array.isArray(item.package_ids)
+          && item.package_ids.every((id) => typeof id === 'string'),
+        ).map((item) => {
+          const packages = 'packages' in item && Array.isArray(item.packages)
+            ? item.packages.filter((reference): reference is PackageReference =>
+              !!reference && typeof reference === 'object'
+              && 'name' in reference && typeof reference.name === 'string'
+              && 'id' in reference && typeof reference.id === 'string'
+              && /^[A-Za-z0-9][A-Za-z0-9.+_-]*$/.test(reference.id)
+              && 'source' in reference && typeof reference.source === 'string',
+            )
+            : undefined
+          return { ...item, packages }
+        })
+        setCollections(validCollections)
+      }
+      setNotice('Imported valid AppPilot preferences. Package installation settings are never imported.')
+      setError(null)
+    } catch (importError) {
+      setError(getErrorMessage(importError))
+      setNotice(null)
+    }
+  }
+
+  const cleanPackageCache = async () => {
+    if (!cacheStatus?.supported || cacheStatus.entries.length === 0) return
+    const sources = cacheStatus.entries.map((entry) => entry.source)
+    if (!window.confirm(`Clean the package-manager caches for ${sources.join(', ')} (about ${formatBytes(cacheStatus.total_bytes)})? AppPilot will use each package manager's own cleanup command.`)) return
+    try {
+      const cleaned = await invoke<string[]>('clean_package_cache', { sources })
+      recordActivity('Cleaned cache', formatBytes(cacheStatus.total_bytes), cleaned.join(', '), true)
+      setNotice(`Package caches cleaned for ${cleaned.join(', ')}.`)
+      setError(null)
+      try {
+        setCacheStatus(await invoke<PackageCacheStatus>('get_package_cache_status'))
+      } catch (refreshError) {
+        setError(`Caches were cleaned, but their new sizes could not be checked: ${getErrorMessage(refreshError)}`)
+      }
+    } catch (cleanupError) {
+      recordActivity('Cache cleanup failed', sources.join(', '), 'Package managers', false)
+      setError(getErrorMessage(cleanupError))
+      setNotice(null)
+    }
+  }
+
+  const reinstallApplication = async (app: AppRecord) => {
+    if (!app.package_name) return
+    if (!window.confirm(`Reinstall ${app.name} from ${app.source}? AppPilot will verify that the same package is still installed first.`)) return
+    try {
+      setPageLoading(true)
+      const message = await invoke<string>('reinstall_package', { appId: app.id })
+      recordActivity('Reinstalled', app.name, app.source, true)
+      setNotice(message)
+      setError(null)
+      await loadOverview()
+    } catch (operationError) {
+      recordActivity('Reinstall failed', app.name, app.source, false)
+      setError(getErrorMessage(operationError))
+      setNotice(null)
+    } finally {
+      setPageLoading(false)
+    }
+  }
+
+  const removeSelectedApplications = async () => {
+    const selected = filteredApps.filter((app) => selectedRemovalIds.includes(app.id) && app.package_name)
+    if (!selected.length) return
+    const preview = selected.map((app) => `${app.name} (${app.source}: ${app.package_name})`).join('\n')
+    if (!window.confirm(`Review the ${selected.length} exact package(s) to remove:\n\n${preview}\n\nContinue?`)) return
+    setBulkUpdating(true)
+    const failures: string[] = []
+    for (const [index, app] of selected.entries()) {
+      setOperationProgress(`Removing ${index + 1} of ${selected.length}: ${app.name}`)
+      try {
+        await invoke<string>('perform_package_action', { appId: app.id, action: 'remove' })
+        recordActivity('Removed', app.name, app.source, true)
+      } catch (removeError) {
+        failures.push(`${app.name}: ${getErrorMessage(removeError)}`)
+        recordActivity('Removal failed', app.name, app.source, false)
+      }
+    }
+    setSelectedRemovalIds([])
+    setNotice(`${selected.length - failures.length} of ${selected.length} selected package(s) removed.`)
+    setError(failures.length ? failures.join('\n') : null)
+    setBulkUpdating(false)
+    setOperationProgress(null)
+    await loadOverview()
   }
 
   const refresh = () => {
@@ -381,10 +829,12 @@ function App() {
     try {
       setLoading(true)
       const message = await invoke<string>('perform_package_action', { appId: app.id, action: 'remove' })
+      recordActivity('Removed', app.name, app.source, true)
       setNotice(message)
       setError(null)
       await loadOverview()
     } catch (operationError) {
+      recordActivity('Removal failed', app.name, app.source, false)
       setError(getErrorMessage(operationError))
       setNotice(null)
     } finally {
@@ -403,14 +853,17 @@ function App() {
         setError(null)
         return
       }
+      if (!window.confirm(`Update ${update.name} to ${update.version} from ${update.source}?`)) return
       setPageLoading(true)
       setNotice(await invoke<string>('update_package', {
         packageName: update.package_name,
         source: update.source,
       }))
+      recordActivity('Updated', update.name, update.source, true)
       setError(null)
       await loadOverview()
     } catch (operationError) {
+      recordActivity('Update failed', app.name, app.source, false)
       setError(getErrorMessage(operationError))
       setNotice(null)
     } finally {
@@ -419,17 +872,20 @@ function App() {
   }
 
   const updatePackage = async (update: PackageUpdate) => {
+    if (!window.confirm(`Update ${update.name} to ${update.version} from ${update.source}?`)) return
     try {
       setPageLoading(true)
       const message = await invoke<string>('update_package', {
         packageName: update.package_name,
         source: update.source,
       })
+      recordActivity('Updated', update.name, update.source, true)
       setNotice(message)
       setError(null)
       await loadCurrentPage()
       await loadOverview()
     } catch (operationError) {
+      recordActivity('Update failed', update.name, update.source, false)
       setError(getErrorMessage(operationError))
       setNotice(null)
     } finally {
@@ -438,13 +894,30 @@ function App() {
   }
 
   const updateAllPackages = async () => {
-    const sources = [...new Set(updates.map((update) => update.source))]
-    if (!window.confirm(`Install all ${updates.length} available updates from ${sources.join(', ')}?`)) return
+    const selected = updates.filter((update) => selectedUpdates.includes(updateId(update)))
+    const sources = [...new Set(selected.map((update) => update.source))]
+    if (selected.length === 0 || !window.confirm(`Update ${selected.length} selected packages from ${sources.join(', ')}?`)) return
     try {
       setBulkUpdating(true)
-      const completed = await invoke<string[]>('update_all_packages')
-      setNotice(completed.length ? `Update completed for: ${completed.join(', ')}.` : 'No updates were available.')
-      setError(null)
+      const completed: string[] = []
+      const failures: string[] = []
+      for (const [index, update] of selected.entries()) {
+        setOperationProgress(`Updating ${index + 1} of ${selected.length}: ${update.name}`)
+        try {
+          await invoke<string>('update_package', {
+            packageName: update.package_name,
+            source: update.source,
+          })
+          completed.push(update.name)
+          recordActivity('Updated', update.name, update.source, true)
+        } catch (updateError) {
+          failures.push(`${update.name}: ${getErrorMessage(updateError)}`)
+          recordActivity('Update failed', update.name, update.source, false)
+        }
+      }
+      setSelectedUpdates([])
+      setNotice(`${completed.length} package(s) updated${failures.length ? `; ${failures.length} failed` : ''}.`)
+      setError(failures.length ? failures.join('\n') : null)
       await loadCurrentPage()
       await loadOverview()
     } catch (updateError) {
@@ -452,6 +925,7 @@ function App() {
       setNotice(null)
     } finally {
       setBulkUpdating(false)
+      setOperationProgress(null)
     }
   }
 
@@ -465,6 +939,7 @@ function App() {
         remote: entry.remote,
         scope: entry.scope,
       })
+      recordActivity('Installed', entry.name, entry.remote, true)
       setNotice(message)
       setError(null)
       setCatalog((current) => current.map((candidate) =>
@@ -474,6 +949,7 @@ function App() {
       ))
       await loadOverview()
     } catch (installError) {
+      recordActivity('Install failed', entry.name, entry.remote, false)
       setError(getErrorMessage(installError))
       setNotice(null)
     } finally {
@@ -677,6 +1153,7 @@ function App() {
               query={query}
               selectedApp={selectedApp}
               selectedId={selectedAppId}
+              selectedRemovalIds={selectedRemovalIds}
               sources={sources}
               sourceFilter={sourceFilter}
               categories={categories}
@@ -692,6 +1169,14 @@ function App() {
               onLaunch={openApplication}
               onManage={manageApplication}
               onUpdate={updateApplication}
+              onReinstall={reinstallApplication}
+              onRemoveSelected={removeSelectedApplications}
+              onToggleRemoval={(id) => setSelectedRemovalIds((current) =>
+                current.includes(id) ? current.filter((selectedId) => selectedId !== id) : [...current, id],
+              )}
+              onSelectVisibleRemoval={(ids) => setSelectedRemovalIds(ids)}
+              operationProgress={operationProgress}
+              bulkBusy={bulkUpdating}
               onQuery={setQuery}
               onSelect={setSelectedAppId}
               sortOrder={sortOrder}
@@ -706,7 +1191,9 @@ function App() {
               platform={platform}
               packageAvailable={platform === 'windows'
                 ? overview?.package_status.winget ?? false
-                : overview?.package_status.flatpak ?? false}
+                : Boolean(overview && Object.entries(overview.package_status)
+                  .filter(([name]) => name !== 'winget' && name !== 'pkexec')
+                  .some(([, available]) => available))}
               entries={filteredCatalog}
               loading={pageLoading}
               query={catalogQuery}
@@ -724,7 +1211,19 @@ function App() {
           ) : null}
 
           {page === 'Updates' ? (
-            <UpdatesPage error={error} loading={pageLoading || bulkUpdating} updates={updates} onUpdate={updatePackage} onUpdateAll={updateAllPackages} />
+            <UpdatesPage
+              error={error}
+              loading={pageLoading || bulkUpdating}
+              progress={operationProgress}
+              updates={updates.filter((update) => !ignoredUpdates.includes(updateId(update)))}
+              deferredCount={updates.filter((update) => ignoredUpdates.includes(updateId(update))).length}
+              selectedUpdates={selectedUpdates}
+              onToggleUpdate={(id) => setSelectedUpdates((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])}
+              onSelectAll={(ids) => setSelectedUpdates(ids)}
+              onIgnore={(id) => setIgnoredUpdates((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])}
+              onUpdate={updatePackage}
+              onUpdateAll={updateAllPackages}
+            />
           ) : null}
 
           {page === 'Startup apps' ? (
@@ -733,6 +1232,35 @@ function App() {
 
           {page === 'Processes' ? (
             <ProcessesPage error={error} processes={processes} loading={pageLoading} platform={platform} onStop={stopProcess} />
+          ) : null}
+
+          {page === 'Tools' ? (
+            <ToolsPage
+              activity={activity}
+              apps={apps}
+              collections={collections}
+              cacheStatus={cacheStatus}
+              diagnostics={diagnostics}
+              ignoredUpdates={ignoredUpdates}
+              importedManifest={importedManifest}
+              packageStatus={overview?.package_status ?? null}
+              platform={platform}
+              reminderDays={reminderDays}
+              bulkBusy={bulkUpdating}
+              operationProgress={operationProgress}
+              onExportManifest={exportSetupManifest}
+              onImportManifest={importSetupManifest}
+              onImportPreferences={importPreferences}
+              onFindPackage={findManifestPackage}
+              onSaveCollection={saveFavoriteCollection}
+              onExportPreferences={exportPreferences}
+              onReminderDays={setReminderDays}
+              onCleanCache={cleanPackageCache}
+              onExportDiagnostics={exportDiagnostics}
+              onInstallManifest={installManifest}
+              onInstallCollection={installCollection}
+              onUnignore={(id) => setIgnoredUpdates((current) => current.filter((item) => item !== id))}
+            />
           ) : null}
 
           {page === 'Settings' ? (
@@ -874,10 +1402,11 @@ function MetricCard({ label, value, icon, detail, tone, loading }: {
 }
 
 function ApplicationsPage({
-  apps, allApps, wingetAvailable, error, loading, query, selectedApp, selectedId, sources, sourceFilter,
+  apps, allApps, wingetAvailable, error, loading, query, selectedApp, selectedId, selectedRemovalIds, sources, sourceFilter,
   categories, categoryFilter, favoritesOnly, favoriteAppIds, sortOrder, onSortOrder, onClearFilters, platform,
   onFilter, onLaunch, onManage, onQuery, onSelect, onUpdate,
-  onCategoryFilter, onToggleFavorites, onToggleFavorite,
+  onCategoryFilter, onToggleFavorites, onToggleFavorite, onReinstall, onRemoveSelected, onToggleRemoval,
+  onSelectVisibleRemoval, operationProgress, bulkBusy,
 }: {
   apps: AppRecord[]
   allApps: AppRecord[]
@@ -887,6 +1416,7 @@ function ApplicationsPage({
   query: string
   selectedApp: AppRecord | null
   selectedId: string | null
+  selectedRemovalIds: string[]
   sources: string[]
   sourceFilter: string
   categories: string[]
@@ -904,9 +1434,19 @@ function ApplicationsPage({
   onLaunch: (app: AppRecord) => void
   onManage: (app: AppRecord) => void
   onUpdate: (app: AppRecord) => void
+  onReinstall: (app: AppRecord) => void
+  onRemoveSelected: () => void
+  onToggleRemoval: (id: string) => void
+  onSelectVisibleRemoval: (ids: string[]) => void
+  operationProgress: string | null
+  bulkBusy: boolean
   onQuery: (query: string) => void
   onSelect: (id: string) => void
 }) {
+  const removableApps = apps.filter((app) => app.package_name
+    && ['APT', 'DNF', 'Pacman', 'Zypper', 'Flatpak', 'Snap', 'WinGet'].includes(app.source))
+  const selectedVisibleIds = removableApps.filter((app) => selectedRemovalIds.includes(app.id)).map((app) => app.id)
+  const allVisibleSelected = removableApps.length > 0 && selectedVisibleIds.length === removableApps.length
   return (
     <>
       <PageHeading eyebrow="SOFTWARE LIBRARY" title="Applications" description={`Installed applications discovered on this ${platform === 'windows' ? 'Windows' : 'Linux'} computer.`} />
@@ -949,6 +1489,22 @@ function ApplicationsPage({
         </div>
         <div className="application-layout">
           <div className="application-list" aria-label="Installed applications">
+            {removableApps.length ? (
+              <div className="bulk-removal-toolbar">
+                <label><input
+                  checked={allVisibleSelected}
+                  disabled={bulkBusy}
+                  onChange={() => onSelectVisibleRemoval(allVisibleSelected
+                    ? selectedRemovalIds.filter((id) => !removableApps.some((app) => app.id === id))
+                    : [...new Set([...selectedRemovalIds, ...removableApps.map((app) => app.id)])])}
+                  type="checkbox"
+                /> Select removable apps ({selectedVisibleIds.length}/{removableApps.length})</label>
+                <button className="danger-link" disabled={bulkBusy || selectedVisibleIds.length === 0} onClick={onRemoveSelected} type="button">
+                  Remove selected
+                </button>
+                {operationProgress ? <span role="status">{operationProgress}</span> : null}
+              </div>
+            ) : null}
             {loading ? <LoadingState label="Scanning your application launchers…" /> : error ? (
               <EmptyState title="Application inventory is unavailable" description="Resolve the backend error above and refresh the scan." />
             ) : apps.length === 0 ? (
@@ -966,20 +1522,28 @@ function ApplicationsPage({
                 {allApps.length > 0 ? <button className="text-button" onClick={onClearFilters} type="button">Clear all filters</button> : null}
               </div>
             ) : apps.map((app) => (
-              <button
-                aria-pressed={selectedId === app.id}
-                className={`application-row${selectedId === app.id ? ' selected' : ''}`}
-                key={app.id}
-                onClick={() => onSelect(app.id)}
-                type="button"
-              >
-                <AppGlyph name={app.name} />
-                <span className="application-row-copy">
-                  <strong>{app.name}</strong>
-                  <small>{app.category.split(',')[0] || 'Application'}</small>
-                </span>
-                <span className={`source-tag ${app.source.toLowerCase()}`}>{app.source}</span>
-              </button>
+              <div className={`application-row${selectedId === app.id ? ' selected' : ''}`} key={app.id}>
+                <button
+                  aria-pressed={selectedId === app.id}
+                  className="application-row-select"
+                  onClick={() => onSelect(app.id)}
+                  type="button"
+                >
+                  <AppGlyph name={app.name} />
+                  <span className="application-row-copy">
+                    <strong>{app.name}</strong>
+                    <small>{app.category.split(',')[0] || 'Application'}</small>
+                  </span>
+                  <span className={`source-tag ${app.source.toLowerCase()}`}>{app.source}</span>
+                </button>
+                {removableApps.some((candidate) => candidate.id === app.id) ? <input
+                  aria-label={`Select ${app.name} for bulk removal`}
+                  checked={selectedRemovalIds.includes(app.id)}
+                  disabled={bulkBusy}
+                  onChange={() => onToggleRemoval(app.id)}
+                  type="checkbox"
+                /> : null}
+              </div>
             ))}
           </div>
           {selectedApp ? (
@@ -1007,11 +1571,17 @@ function ApplicationsPage({
                 <span aria-hidden="true">{favoriteAppIds.includes(selectedApp.id) ? '★' : '☆'}</span>
                 {favoriteAppIds.includes(selectedApp.id) ? 'Remove from favorites' : 'Add to favorites'}
               </button>
-              {selectedApp.package_name && ['APT', 'Flatpak', 'Snap', 'WinGet'].includes(selectedApp.source) ? (
-                <div className="detail-actions">
-                  <button className="secondary-button" onClick={() => onUpdate(selectedApp)} type="button">Check for update</button>
-                  <button className="danger-link" onClick={() => onManage(selectedApp)} type="button">Uninstall</button>
-                </div>
+              {selectedApp.package_name && ['APT', 'DNF', 'Pacman', 'Zypper', 'Flatpak', 'Snap', 'WinGet'].includes(selectedApp.source) ? (
+                <>
+                  <div className="detail-actions">
+                    <button className="secondary-button" onClick={() => onUpdate(selectedApp)} type="button">Check for update</button>
+                    {['APT', 'DNF', 'Pacman', 'Zypper', 'WinGet'].includes(selectedApp.source)
+                      ? <button className="secondary-button" disabled={bulkBusy} onClick={() => onReinstall(selectedApp)} type="button">Reinstall</button>
+                      : <span className="action-note">Reinstall is not exposed for {selectedApp.source}; the provider cannot safely target this exact package.</span>}
+                    <button className="danger-link" onClick={() => onManage(selectedApp)} type="button">Uninstall</button>
+                  </div>
+                  <p className="action-note">Version rollback is unavailable for {selectedApp.source} because AppPilot cannot verify a safe target version.</p>
+                </>
               ) : (
                 <p className="action-note">Package actions are unavailable because this launcher is not linked to a verified package.</p>
               )}
@@ -1043,12 +1613,12 @@ function DiscoverPage({
         title="Discover"
         description={isWindows
           ? 'Search the live WinGet catalogue and install a verified package for your account.'
-          : 'Browse applications from Flatpak remotes configured on this computer.'}
+          : 'Search installed Linux package sources and install using their native package manager.'}
       />
       <section className="content-card">
         <div className="catalog-toolbar">
           <div className="list-heading">
-            <div><h2>Available applications</h2><p>{isWindows ? 'Search by app name or package ID. Results come directly from WinGet.' : 'Only results reported by your configured Flatpak remotes are shown.'}</p></div>
+            <div><h2>Available applications</h2><p>{isWindows ? 'Search by app name or package ID. Results come directly from WinGet.' : 'Search APT, DNF, Pacman, Zypper, Flatpak and Snap sources available on this system.'}</p></div>
             <span className="result-count">{loading ? '…' : entries.length}</span>
           </div>
           <label className="catalog-search">
@@ -1056,13 +1626,13 @@ function DiscoverPage({
             <input
               aria-label="Search available applications"
               onChange={(event) => onQuery(event.target.value)}
-              placeholder={isWindows ? 'Type at least 2 letters to search WinGet' : 'Search name, description or app ID'}
+              placeholder={isWindows ? 'Type at least 2 letters to search WinGet' : 'Type 2+ letters to search available sources'}
               type="search"
               value={query}
             />
           </label>
         </div>
-        {loading ? <LoadingState label={isWindows ? 'Searching WinGet…' : 'Checking configured Flatpak remotes…'} /> : entries.length === 0 ? (
+        {loading ? <LoadingState label={isWindows ? 'Searching WinGet…' : 'Searching configured package sources…'} /> : entries.length === 0 ? (
           <EmptyState
             title={isWindows && !packageAvailable
               ? 'WinGet is not available yet'
@@ -1073,7 +1643,9 @@ function DiscoverPage({
               ? 'Try a different name or package ID.'
               : isWindows
                 ? 'Enter at least two letters above. AppPilot only shows packages returned by the configured WinGet sources.'
-                : 'Install Flatpak and add an application remote such as Flathub, then refresh this page.'}
+                : query.length < 2
+                  ? 'Enter at least two letters to search installed package sources.'
+                  : 'No configured source returned a matching application. Check the package integrations in Settings.'}
           />
         ) : (
           <div className="catalog-list">
@@ -1111,35 +1683,51 @@ function DiscoverPage({
   )
 }
 
-function UpdatesPage({ updates, loading, error, onUpdate, onUpdateAll }: {
+function UpdatesPage({ updates, loading, error, progress, selectedUpdates, deferredCount, onUpdate, onUpdateAll, onToggleUpdate, onSelectAll, onIgnore }: {
   updates: PackageUpdate[]
   loading: boolean
   error: string | null
+  progress: string | null
+  selectedUpdates: string[]
+  deferredCount: number
   onUpdate: (update: PackageUpdate) => void
   onUpdateAll: () => void
+  onToggleUpdate: (id: string) => void
+  onSelectAll: (ids: string[]) => void
+  onIgnore: (id: string) => void
 }) {
+  const visibleIds = updates.map(updateId)
+  const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedUpdates.includes(id))
+  const visibleSelectedCount = selectedUpdates.filter((id) => visibleIds.includes(id)).length
   return (
     <>
       <PageHeading
         eyebrow="SOFTWARE MAINTENANCE"
         title="Updates"
         description="Available updates reported by the package managers installed on this system."
-        action={updates.length > 0 ? <button className="primary-button" disabled={loading} onClick={onUpdateAll} type="button">Update all ({updates.length})</button> : undefined}
+        action={updates.length > 0 ? <button className="primary-button" disabled={loading || visibleSelectedCount === 0} onClick={onUpdateAll} type="button">Update selected ({visibleSelectedCount})</button> : undefined}
       />
       <section className="content-card">
-        <div className="list-heading"><div><h2>Available updates</h2><p>Read directly from {updates.some((update) => update.source === 'WinGet') ? 'WinGet' : 'APT, Flatpak and Snap'}.</p></div><span className="result-count">{loading ? 'Checking…' : updates.length}</span></div>
+        <div className="list-heading"><div><h2>Available updates</h2><p>Read directly from configured package sources; each selected action is confirmed before it runs.</p></div><span className="result-count">{loading ? 'Checking…' : updates.length}</span></div>
+        {progress ? <div className="operation-progress" role="status">{progress}</div> : null}
         {loading ? <LoadingState label="Checking configured package sources…" /> : error ? (
           <EmptyState title="Update check is unavailable" description="Resolve the package-manager error above and refresh the check." />
         ) : updates.length === 0 ? (
-          <EmptyState title="Everything is up to date" description="No available upgrades were reported by the package managers." />
+          <EmptyState title={deferredCount ? 'No visible updates' : 'Everything is up to date'} description={deferredCount ? `${deferredCount} update(s) are deferred. Restore them in Tools when you are ready.` : 'No available upgrades were reported by the package managers.'} />
         ) : (
           <div className="data-list">
+            <div className="updates-select-all">
+              <label><input checked={allSelected} onChange={() => onSelectAll(allSelected ? [] : visibleIds)} type="checkbox" /> Select all visible ({updates.length})</label>
+              <span>{visibleSelectedCount} selected</span>
+            </div>
             {updates.map((update) => (
               <div className="data-row update-row" key={`${update.source}:${update.package_name}`}>
+                <input aria-label={`Select update for ${update.name}`} checked={selectedUpdates.includes(updateId(update))} onChange={() => onToggleUpdate(updateId(update))} type="checkbox" />
                 <AppGlyph name={update.name} />
-                <div className="data-row-main"><strong>{update.name}</strong><small>{update.package_name} · {update.source}</small></div>
+                <div className="data-row-main"><strong>{update.name}</strong><small>{update.package_name} · {update.source} · available {update.version}</small></div>
                 <span className="version-tag">{update.version}</span>
                 <button className="secondary-button update-button" onClick={() => onUpdate(update)} type="button">Update</button>
+                <button aria-label={`Defer update for ${update.name}`} className="text-button" onClick={() => onIgnore(updateId(update))} type="button">Defer</button>
               </div>
             ))}
           </div>
@@ -1228,6 +1816,184 @@ function ProcessesPage({ processes, loading, error, onStop, platform }: {
   )
 }
 
+function ToolsPage({
+  activity, apps, collections, ignoredUpdates, importedManifest, packageStatus, cacheStatus, diagnostics, platform, reminderDays,
+  onExportManifest, onImportManifest, onImportPreferences, onFindPackage, onSaveCollection, onExportPreferences,
+  onReminderDays, onUnignore, onCleanCache, onExportDiagnostics, onInstallManifest, onInstallCollection, bulkBusy, operationProgress,
+}: {
+  activity: ActivityItem[]
+  apps: AppRecord[]
+  collections: AppCollection[]
+  ignoredUpdates: string[]
+  importedManifest: SetupManifest | null
+  packageStatus: PackageStatus | null
+  cacheStatus: PackageCacheStatus | null
+  diagnostics: SystemDiagnostics | null
+  platform: string
+  reminderDays: number
+  bulkBusy: boolean
+  operationProgress: string | null
+  onExportManifest: (onlyFavorites?: boolean) => void
+  onImportManifest: (file: File) => void
+  onImportPreferences: (file: File) => void
+  onFindPackage: (id: string) => void
+  onSaveCollection: (name: string) => void
+  onExportPreferences: () => void
+  onReminderDays: (days: number) => void
+  onUnignore: (id: string) => void
+  onCleanCache: () => void
+  onExportDiagnostics: () => void
+  onInstallManifest: (manifest: SetupManifest) => void
+  onInstallCollection: (collection: AppCollection) => void
+}) {
+  const [collectionName, setCollectionName] = useState('')
+  const integrations: [string, boolean][] = platform === 'windows'
+    ? [['WinGet', packageStatus?.winget ?? false]]
+    : [
+      ['APT', packageStatus?.apt ?? false],
+      ['DNF', packageStatus?.dnf ?? false],
+      ['Pacman', packageStatus?.pacman ?? false],
+      ['Zypper', packageStatus?.zypper ?? false],
+      ['Flatpak', packageStatus?.flatpak ?? false],
+      ['Snap', packageStatus?.snap ?? false],
+    ]
+  const installed = (item: SetupManifest['packages'][number]) => apps.some((app) =>
+    app.package_name?.toLowerCase() === item.id.toLowerCase() && app.source === item.source,
+  )
+
+  return (
+    <>
+      <PageHeading eyebrow="WORKSPACE TOOLS" title="Tools" description="Move your setup, organize software, and understand the package sources available on this computer." />
+      <div className="tools-grid">
+        <section className="content-card tool-card">
+          <div className="list-heading"><div><h2>Setup manifest</h2><p>Save package references, not application binaries or personal data.</p></div></div>
+          <div className="tool-actions">
+            <button className="secondary-button" onClick={() => onExportManifest(false)} type="button">Export installed apps</button>
+            <button className="secondary-button" onClick={() => onExportManifest(true)} type="button">Export favorites</button>
+            <label className="secondary-button file-button">Review a manifest<input accept="application/json,.json" onChange={(event) => {
+              const file = event.target.files?.[0]
+              if (file) onImportManifest(file)
+              event.currentTarget.value = ''
+            }} type="file" /></label>
+          </div>
+          {importedManifest ? (
+            <div className="manifest-preview">
+              <strong>Restore preview · {importedManifest.packages.length} packages</strong>
+              <p>Already installed on this device: {importedManifest.packages.filter(installed).length}. AppPilot checks package IDs and sources against the live catalog before a confirmed install queue.</p>
+              <button className="secondary-button cache-clean-button" disabled={bulkBusy} onClick={() => onInstallManifest(importedManifest)} type="button">Review and install available packages</button>
+              {operationProgress ? <p className="tool-footnote" role="status">{operationProgress}</p> : null}
+              <div className="manifest-items">
+                {importedManifest.packages.map((item) => (
+                  <div className="manifest-item" key={`${item.source}:${item.id}`}>
+                    <span><strong>{item.name}</strong><small>{item.id} · {item.source}</small></span>
+                    {installed(item)
+                      ? <span className="installed-status"><i />Installed</span>
+                      : <button className="text-button" onClick={() => onFindPackage(item.id)} type="button">Find package</button>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </section>
+
+        <section className="content-card tool-card">
+          <div className="list-heading"><div><h2>Collections</h2><p>Save a named set from your favorites for easier setup planning.</p></div></div>
+          <form className="collection-form" onSubmit={(event) => {
+            event.preventDefault()
+            onSaveCollection(collectionName)
+            setCollectionName('')
+          }}>
+            <input aria-label="Collection name" maxLength={48} onChange={(event) => setCollectionName(event.target.value)} placeholder="e.g. Work essentials" value={collectionName} />
+            <button className="secondary-button" disabled={!collectionName.trim()} type="submit">Save favorites</button>
+          </form>
+          {collections.length ? <div className="collection-list">{collections.map((collection) => (
+            <div className="integration-row" key={collection.name}>
+              <span>{collection.name}<small className="tool-subline">{collection.packages?.length ?? collection.package_ids.length} package references</small></span>
+              <button className="text-button" disabled={bulkBusy} onClick={() => onInstallCollection(collection)} type="button">Review install queue</button>
+            </div>
+          ))}</div> : <p className="tool-footnote">Favorite a few installed apps first, then save them here as a collection.</p>}
+          <div className="tool-actions">
+            <button className="secondary-button" onClick={onExportPreferences} type="button">Export preferences</button>
+            <label className="secondary-button file-button">Import preferences<input accept="application/json,.json" onChange={(event) => {
+              const file = event.target.files?.[0]
+              if (file) onImportPreferences(file)
+              event.currentTarget.value = ''
+            }} type="file" /></label>
+          </div>
+        </section>
+
+        <section className="content-card tool-card">
+          <div className="list-heading"><div><h2>Package source check</h2><p>Availability is detected locally; missing providers are never assumed.</p></div></div>
+          <div className="integration-list">{integrations.map(([name, available]) => (
+            <div className="integration-row" key={name}><span>{name}</span><span className={`integration-status${available ? ' online' : ''}`}><i />{available ? 'Available' : 'Not installed'}</span></div>
+          ))}</div>
+          <p className="tool-footnote">Linux distribution: {platform === 'linux' ? 'Native package support depends on the detected package tools above.' : 'Windows package actions use WinGet for the current account.'}</p>
+        </section>
+
+        <section className="content-card tool-card">
+          <div className="list-heading"><div><h2>System diagnostics</h2><p>Read-only system information to help identify supported package sources.</p></div></div>
+          {diagnostics ? (
+            <>
+              <div className="integration-list">
+                <div className="integration-row"><span>Platform</span><strong>{diagnostics.platform}</strong></div>
+                <div className="integration-row"><span>Distribution</span><strong>{diagnostics.distribution}</strong></div>
+                <div className="integration-row"><span>Release</span><strong>{diagnostics.release}</strong></div>
+                {diagnostics.kernel ? <div className="integration-row"><span>Kernel</span><strong>{diagnostics.kernel}</strong></div> : null}
+                <div className="integration-row"><span>Architecture</span><strong>{diagnostics.architecture}</strong></div>
+                <div className="integration-row"><span>Detected package tools</span><strong>{diagnostics.package_sources.join(', ') || 'None'}</strong></div>
+              </div>
+              {diagnostics.notices.map((message) => <p className="tool-footnote" key={message}>{message}</p>)}
+              <button className="secondary-button cache-clean-button" onClick={onExportDiagnostics} type="button">Export diagnostics summary</button>
+            </>
+          ) : <p className="tool-footnote">Collecting read-only system information…</p>}
+        </section>
+
+        <section className="content-card tool-card">
+          <div className="list-heading"><div><h2>Package cache storage</h2><p>{cacheStatus?.message ?? 'Inspecting package-manager cache locations…'}</p></div></div>
+          {cacheStatus?.entries.length ? (
+            <>
+              <div className="integration-list">{cacheStatus.entries.map((entry) => (
+                <div className="integration-row" key={entry.source}><span>{entry.source}<small className="tool-subline">{entry.path}</small></span><strong>{formatBytes(entry.bytes)}</strong></div>
+              ))}</div>
+              <div className="cache-total"><span>Estimated total</span><strong>{formatBytes(cacheStatus.total_bytes)}</strong></div>
+            </>
+          ) : null}
+          {cacheStatus?.supported ? <button className="secondary-button cache-clean-button" onClick={onCleanCache} type="button">Review and clean caches</button> : <p className="tool-footnote">Cleanup is unavailable unless the system exposes a supported package-manager command.</p>}
+        </section>
+
+        <section className="content-card tool-card">
+          <div className="list-heading"><div><h2>Update reminders</h2><p>Remind while AppPilot is open. Packages are never installed automatically.</p></div></div>
+          <label className="reminder-setting">Check-in reminder
+            <select onChange={(event) => onReminderDays(Number(event.target.value))} value={reminderDays}>
+              <option value={0}>Off</option>
+              <option value={1}>Every day</option>
+              <option value={7}>Every week</option>
+              <option value={30}>Every month</option>
+            </select>
+          </label>
+        </section>
+
+        <section className="content-card tool-card">
+          <div className="list-heading"><div><h2>Deferred updates</h2><p>Hidden from the update list on this device until restored.</p></div><span className="result-count">{ignoredUpdates.length}</span></div>
+          {ignoredUpdates.length ? <div className="collection-list">{ignoredUpdates.map((id) => (
+            <div className="integration-row" key={id}><span>{id}</span><button className="text-button" onClick={() => onUnignore(id)} type="button">Restore</button></div>
+          ))}</div> : <p className="tool-footnote">No updates have been deferred.</p>}
+        </section>
+
+        <section className="content-card tool-card">
+          <div className="list-heading"><div><h2>Recent AppPilot actions</h2><p>Stored locally on this device. The history is limited to 100 entries.</p></div><span className="result-count">{activity.length}</span></div>
+          {activity.length ? <div className="collection-list">{activity.slice(0, 10).map((item) => (
+            <div className="integration-row" key={item.id}>
+              <span>{item.action} · {item.target}<small className="tool-subline">{item.source} · {new Date(item.timestamp).toLocaleString()}</small></span>
+              <span className={`integration-status${item.successful ? ' online' : ''}`}><i />{item.successful ? 'Done' : 'Failed'}</span>
+            </div>
+          ))}</div> : <p className="tool-footnote">Install, update and removal actions will appear here.</p>}
+        </section>
+      </div>
+    </>
+  )
+}
+
 function SettingsPage({ theme, compactMode, packageStatus, platform, onTheme, onCompactMode }: {
   theme: 'dark' | 'light'
   compactMode: boolean
@@ -1240,6 +2006,9 @@ function SettingsPage({ theme, compactMode, packageStatus, platform, onTheme, on
     ? [['WinGet', packageStatus?.winget]]
     : [
       ['APT', packageStatus?.apt],
+      ['DNF', packageStatus?.dnf],
+      ['Pacman', packageStatus?.pacman],
+      ['Zypper', packageStatus?.zypper],
       ['Flatpak', packageStatus?.flatpak],
       ['Snap', packageStatus?.snap],
     ]

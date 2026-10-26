@@ -23,6 +23,9 @@ pub struct AppRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PackageManagerStatus {
     pub apt: bool,
+    pub dnf: bool,
+    pub pacman: bool,
+    pub zypper: bool,
     pub flatpak: bool,
     pub snap: bool,
     pub pkexec: bool,
@@ -67,6 +70,32 @@ pub struct PackageUpdate {
     pub name: String,
     pub source: String,
     pub version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageCacheEntry {
+    pub source: String,
+    pub path: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageCacheStatus {
+    pub supported: bool,
+    pub message: String,
+    pub entries: Vec<PackageCacheEntry>,
+    pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemDiagnostics {
+    pub platform: String,
+    pub distribution: String,
+    pub release: String,
+    pub kernel: Option<String>,
+    pub architecture: String,
+    pub package_sources: Vec<String>,
+    pub notices: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +155,53 @@ async fn get_package_updates() -> Result<Vec<PackageUpdate>, String> {
     tauri::async_runtime::spawn_blocking(get_package_updates_impl)
         .await
         .map_err(|error| format!("update check task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn get_package_cache_status() -> Result<PackageCacheStatus, String> {
+    Ok(PackageCacheStatus {
+        supported: false,
+        message: "WinGet does not provide a supported cache-cleanup operation. AppPilot will not delete its files manually.".to_string(),
+        entries: Vec::new(),
+        total_bytes: 0,
+    })
+}
+
+#[tauri::command]
+async fn get_system_diagnostics() -> Result<SystemDiagnostics, String> {
+    let winget_available = find_winget().is_some();
+    let version_output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Environment]::OSVersion.Version.ToString()",
+        ])
+        .output()
+        .map_err(|error| format!("could not read the Windows version: {error}"))?;
+    let release = successful_text("Windows version query", &version_output)?;
+    Ok(SystemDiagnostics {
+        platform: "Windows".to_string(),
+        distribution: "Microsoft Windows".to_string(),
+        release,
+        kernel: None,
+        architecture: std::env::consts::ARCH.to_string(),
+        package_sources: if winget_available {
+            vec!["WinGet".to_string()]
+        } else {
+            Vec::new()
+        },
+        notices: if winget_available {
+            Vec::new()
+        } else {
+            vec!["WinGet is unavailable; install and update actions are disabled.".to_string()]
+        },
+    })
+}
+
+#[tauri::command]
+async fn clean_package_cache(_sources: Vec<String>) -> Result<Vec<String>, String> {
+    Err("No supported WinGet cache-cleanup command is available.".to_string())
 }
 
 fn get_package_updates_impl() -> Result<Vec<PackageUpdate>, String> {
@@ -307,6 +383,31 @@ fn perform_package_action_impl(app_id: String, action: String) -> Result<String,
     successful_text("WinGet uninstall", &output)?;
     invalidate_application_cache()?;
     Ok(format!("Uninstalled {app_id} with WinGet."))
+}
+
+#[tauri::command]
+async fn reinstall_package(app_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || reinstall_package_impl(app_id))
+        .await
+        .map_err(|error| format!("package reinstall task failed: {error}"))?
+}
+
+fn reinstall_package_impl(app_id: String) -> Result<String, String> {
+    validate_winget_package(&app_id, WINGET_SOURCE)?;
+    ensure_installed_package(&app_id)?;
+    let output = run_winget(&[
+        "install",
+        "--id",
+        &app_id,
+        "--exact",
+        "--force",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--disable-interactivity",
+    ])?;
+    successful_text("WinGet package reinstall", &output)?;
+    invalidate_application_cache()?;
+    Ok(format!("Reinstalled {app_id} with WinGet."))
 }
 
 #[tauri::command]
@@ -825,6 +926,9 @@ pub fn run() {
             scan_startup_entries,
             scan_running_processes,
             get_package_updates,
+            get_package_cache_status,
+            clean_package_cache,
+            get_system_diagnostics,
             update_all_packages,
             search_package_catalog,
             install_flatpak_application,
@@ -832,6 +936,7 @@ pub fn run() {
             terminate_process,
             launch_application,
             perform_package_action,
+            reinstall_package,
             update_package
         ])
         .setup(|app| {

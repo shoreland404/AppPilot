@@ -25,6 +25,9 @@ pub struct AppRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PackageManagerStatus {
     pub apt: bool,
+    pub dnf: bool,
+    pub pacman: bool,
+    pub zypper: bool,
     pub flatpak: bool,
     pub snap: bool,
     pub pkexec: bool,
@@ -72,6 +75,32 @@ pub struct PackageUpdate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageCacheEntry {
+    pub source: String,
+    pub path: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageCacheStatus {
+    pub supported: bool,
+    pub message: String,
+    pub entries: Vec<PackageCacheEntry>,
+    pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemDiagnostics {
+    pub platform: String,
+    pub distribution: String,
+    pub release: String,
+    pub kernel: Option<String>,
+    pub architecture: String,
+    pub package_sources: Vec<String>,
+    pub notices: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlatpakCatalogEntry {
     pub app_id: String,
     pub name: String,
@@ -95,9 +124,13 @@ struct ParsedDesktopEntry {
 enum PackageAction {
     Remove,
     Update,
+    Install,
 }
 
 const APT_SOURCE: &str = "APT";
+const DNF_SOURCE: &str = "DNF";
+const PACMAN_SOURCE: &str = "Pacman";
+const ZYPPER_SOURCE: &str = "Zypper";
 const FLATPAK_SOURCE: &str = "Flatpak";
 const SNAP_SOURCE: &str = "Snap";
 const LOCAL_SOURCE: &str = "Local";
@@ -434,6 +467,193 @@ async fn get_package_updates() -> Result<Vec<PackageUpdate>, String> {
         .map_err(|error| format!("package update scan task failed: {error}"))?
 }
 
+#[tauri::command]
+async fn get_package_cache_status() -> Result<PackageCacheStatus, String> {
+    tauri::async_runtime::spawn_blocking(get_package_cache_status_impl)
+        .await
+        .map_err(|error| format!("package cache scan task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn get_system_diagnostics() -> Result<SystemDiagnostics, String> {
+    tauri::async_runtime::spawn_blocking(get_system_diagnostics_impl)
+        .await
+        .map_err(|error| format!("system diagnostics task failed: {error}"))?
+}
+
+fn get_system_diagnostics_impl() -> Result<SystemDiagnostics, String> {
+    let release_data = fs::read_to_string("/etc/os-release")
+        .map_err(|error| format!("could not read Linux distribution information: {error}"))?;
+    let values: HashMap<&str, String> = release_data
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            Some((key, value.trim_matches('"').to_string()))
+        })
+        .collect();
+    let distribution = values
+        .get("PRETTY_NAME")
+        .or_else(|| values.get("ID"))
+        .cloned()
+        .unwrap_or_else(|| "Unknown Linux distribution".to_string());
+    let release = values
+        .get("VERSION_ID")
+        .cloned()
+        .unwrap_or_else(|| "Unknown release".to_string());
+    let kernel_output = run_command("uname", &["-r"])?;
+    ensure_success("Linux kernel information", &kernel_output)?;
+    let kernel = String::from_utf8_lossy(&kernel_output.stdout)
+        .trim()
+        .to_string();
+    let managers = detect_package_managers();
+    let package_sources = [
+        (APT_SOURCE, managers.apt),
+        (DNF_SOURCE, managers.dnf),
+        (PACMAN_SOURCE, managers.pacman),
+        (ZYPPER_SOURCE, managers.zypper),
+        (FLATPAK_SOURCE, managers.flatpak),
+        (SNAP_SOURCE, managers.snap),
+    ]
+    .into_iter()
+    .filter_map(|(name, available)| available.then(|| name.to_string()))
+    .collect::<Vec<_>>();
+    let mut notices = Vec::new();
+    if package_sources.is_empty() {
+        notices.push("No supported package manager was found in PATH.".to_string());
+    }
+    if !managers.pkexec {
+        notices.push("pkexec is unavailable; system-level package actions cannot be authorized through AppPilot.".to_string());
+    }
+    notices.push("Repository reachability and package-manager lock state are checked only when you explicitly search or check for updates.".to_string());
+    Ok(SystemDiagnostics {
+        platform: "Linux".to_string(),
+        distribution,
+        release,
+        kernel: (!kernel.is_empty()).then_some(kernel),
+        architecture: std::env::consts::ARCH.to_string(),
+        package_sources,
+        notices,
+    })
+}
+
+fn get_package_cache_status_impl() -> Result<PackageCacheStatus, String> {
+    let managers = detect_package_managers();
+    let candidates = [
+        (APT_SOURCE, PathBuf::from("/var/cache/apt/archives")),
+        (DNF_SOURCE, PathBuf::from("/var/cache/dnf")),
+        (PACMAN_SOURCE, PathBuf::from("/var/cache/pacman/pkg")),
+        (ZYPPER_SOURCE, PathBuf::from("/var/cache/zypp/packages")),
+    ];
+    let mut entries = Vec::new();
+    for (source, path) in candidates {
+        let available = match source {
+            APT_SOURCE => managers.apt,
+            DNF_SOURCE => managers.dnf,
+            PACMAN_SOURCE => managers.pacman,
+            ZYPPER_SOURCE => managers.zypper,
+            _ => false,
+        };
+        if available && path.is_dir() {
+            entries.push(PackageCacheEntry {
+                source: source.to_string(),
+                bytes: directory_size(&path)?,
+                path: path.display().to_string(),
+            });
+        }
+    }
+    let total_bytes = entries
+        .iter()
+        .fold(0_u64, |total, entry| total.saturating_add(entry.bytes));
+    Ok(PackageCacheStatus {
+        supported: !entries.is_empty(),
+        message: if entries.is_empty() {
+            "No supported package cache directories were found.".to_string()
+        } else {
+            "Sizes are local estimates. Cleanup uses the package manager's own cache command."
+                .to_string()
+        },
+        entries,
+        total_bytes,
+    })
+}
+
+fn directory_size(root: &Path) -> Result<u64, String> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut total = 0_u64;
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)
+            .map_err(|error| format!("could not inspect {}: {error}", directory.display()))?
+        {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "could not inspect an entry in {}: {error}",
+                    directory.display()
+                )
+            })?;
+            let file_type = entry.file_type().map_err(|error| {
+                format!("could not inspect {}: {error}", entry.path().display())
+            })?;
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                total = total.saturating_add(
+                    entry
+                        .metadata()
+                        .map_err(|error| {
+                            format!(
+                                "could not read metadata for {}: {error}",
+                                entry.path().display()
+                            )
+                        })?
+                        .len(),
+                );
+            }
+        }
+    }
+    Ok(total)
+}
+
+#[tauri::command]
+async fn clean_package_cache(sources: Vec<String>) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || clean_package_cache_impl(sources))
+        .await
+        .map_err(|error| format!("package cache cleanup task failed: {error}"))?
+}
+
+fn clean_package_cache_impl(sources: Vec<String>) -> Result<Vec<String>, String> {
+    if sources.is_empty() {
+        return Err("Select at least one available package cache to clean.".to_string());
+    }
+    if !detect_package_managers().pkexec {
+        return Err("pkexec is required to authorize package cache cleanup.".to_string());
+    }
+    let managers = detect_package_managers();
+    let mut cleaned = Vec::new();
+    for source in sources {
+        let (manager, arguments): (&str, &[&str]) = match source.as_str() {
+            APT_SOURCE if managers.apt => ("apt-get", &["clean"]),
+            DNF_SOURCE if managers.dnf => ("dnf", &["clean", "packages"]),
+            PACMAN_SOURCE if managers.pacman => ("pacman", &["-Sc", "--noconfirm"]),
+            ZYPPER_SOURCE if managers.zypper => ("zypper", &["clean", "--packages"]),
+            _ => return Err(format!("Unsupported or unavailable cache source: {source}")),
+        };
+        let mut command = vec![manager];
+        command.extend_from_slice(arguments);
+        if let Err(error) = run_privileged_command("pkexec", &command) {
+            return Err(if cleaned.is_empty() {
+                error
+            } else {
+                format!(
+                    "Cleaned {} before a later cleanup failed: {error}",
+                    cleaned.join(", ")
+                )
+            });
+        }
+        cleaned.push(source);
+    }
+    Ok(cleaned)
+}
+
 fn get_package_updates_impl() -> Result<Vec<PackageUpdate>, String> {
     let managers = detect_package_managers();
     let mut updates = Vec::new();
@@ -502,6 +722,61 @@ fn get_package_updates_impl() -> Result<Vec<PackageUpdate>, String> {
         }
     }
 
+    if managers.dnf {
+        let output = run_command("dnf", &["check-update", "--quiet"])?;
+        if !output.status.success() && output.status.code() != Some(100) {
+            ensure_success("DNF update check", &output)?;
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() >= 3 && valid_package_id(fields[0]) {
+                updates.push(PackageUpdate {
+                    package_name: fields[0].split('.').next().unwrap_or(fields[0]).to_string(),
+                    name: fields[0].split('.').next().unwrap_or(fields[0]).to_string(),
+                    source: DNF_SOURCE.to_string(),
+                    version: fields[1].to_string(),
+                });
+            }
+        }
+    }
+
+    if managers.zypper {
+        let output = run_command("zypper", &["--no-refresh", "list-updates"])?;
+        ensure_success("Zypper update check", &output)?;
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let fields: Vec<&str> = line.split('|').map(str::trim).collect();
+            if fields.len() >= 6 && valid_package_id(fields[2]) {
+                updates.push(PackageUpdate {
+                    package_name: fields[2].to_string(),
+                    name: fields[2].to_string(),
+                    source: ZYPPER_SOURCE.to_string(),
+                    version: fields[4].to_string(),
+                });
+            }
+        }
+    }
+
+    if managers.pacman {
+        let output = run_command("pacman", &["-Qu"])?;
+        ensure_success("Pacman update check", &output)?;
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let Some((package, versions)) = line.split_once(' ') else {
+                continue;
+            };
+            let Some((_, available)) = versions.split_once(" -> ") else {
+                continue;
+            };
+            if valid_package_id(package) {
+                updates.push(PackageUpdate {
+                    package_name: package.to_string(),
+                    name: package.to_string(),
+                    source: PACMAN_SOURCE.to_string(),
+                    version: available.to_string(),
+                });
+            }
+        }
+    }
+
     updates.sort_by_key(|update| update.name.to_lowercase());
     Ok(updates)
 }
@@ -563,15 +838,90 @@ async fn search_package_catalog(query: String) -> Result<Vec<FlatpakCatalogEntry
 }
 
 fn search_package_catalog_impl(query: String) -> Result<Vec<FlatpakCatalogEntry>, String> {
-    let query = query.trim().to_lowercase();
-    let mut catalog = list_flatpak_catalog_impl()?;
-    if !query.is_empty() {
-        catalog.retain(|entry| {
+    let query = query.trim();
+    if query.chars().count() < 2
+        || query.chars().count() > 100
+        || query.chars().any(char::is_control)
+    {
+        return Ok(Vec::new());
+    }
+    if query.starts_with('-') {
+        return Err(String::from(
+            "Search text cannot begin with a dash. Enter an application name or package ID.",
+        ));
+    }
+    let managers = detect_package_managers();
+    let installed: HashSet<(String, String)> = scan_applications_uncached()?
+        .into_iter()
+        .filter_map(|app| Some((app.package_name?, app.source)))
+        .collect();
+    let mut catalog = Vec::new();
+
+    if managers.flatpak {
+        catalog.extend(list_flatpak_catalog_impl()?.into_iter().filter(|entry| {
+            let query = query.to_lowercase();
             entry.name.to_lowercase().contains(&query)
                 || entry.app_id.to_lowercase().contains(&query)
                 || entry.description.to_lowercase().contains(&query)
-        });
+        }));
     }
+    if managers.apt {
+        let output = run_command("apt-cache", &["search", "--names-only", query])?;
+        ensure_success("APT catalogue search", &output)?;
+        catalog.extend(parse_apt_search(
+            &String::from_utf8_lossy(&output.stdout),
+            query,
+            &installed,
+        ));
+    }
+    if managers.dnf {
+        let output = run_command("dnf", &["search", "--quiet", query])?;
+        ensure_success("DNF catalogue search", &output)?;
+        catalog.extend(parse_dnf_search(
+            &String::from_utf8_lossy(&output.stdout),
+            query,
+            &installed,
+        ));
+    }
+    if managers.pacman {
+        let output = run_command("pacman", &["-Ss", query])?;
+        ensure_success("Pacman catalogue search", &output)?;
+        catalog.extend(parse_pacman_search(
+            &String::from_utf8_lossy(&output.stdout),
+            query,
+            &installed,
+        ));
+    }
+    if managers.zypper {
+        let output = run_command("zypper", &["--no-refresh", "search", "--details", query])?;
+        ensure_success("Zypper catalogue search", &output)?;
+        catalog.extend(parse_zypper_search(
+            &String::from_utf8_lossy(&output.stdout),
+            query,
+            &installed,
+        ));
+    }
+    if managers.snap {
+        let output = run_command("snap", &["find", query])?;
+        ensure_success("Snap catalogue search", &output)?;
+        catalog.extend(parse_snap_search(
+            &String::from_utf8_lossy(&output.stdout),
+            query,
+            &installed,
+        ));
+    }
+    catalog.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then(left.remote.cmp(&right.remote))
+            .then(left.app_id.cmp(&right.app_id))
+    });
+    catalog.dedup_by(|left, right| {
+        left.remote == right.remote
+            && left.scope == right.scope
+            && left.app_id.eq_ignore_ascii_case(&right.app_id)
+    });
     Ok(catalog)
 }
 
@@ -649,6 +999,15 @@ fn update_all_packages_impl() -> Result<Vec<String>, String> {
         run_privileged_command("pkexec", &arguments)?;
     }
 
+    for update in updates.iter().filter(|update| {
+        matches!(
+            update.source.as_str(),
+            DNF_SOURCE | ZYPPER_SOURCE | PACMAN_SOURCE
+        )
+    }) {
+        run_native_package_action(&update.package_name, &update.source, PackageAction::Update)?;
+    }
+
     invalidate_application_cache()?;
     Ok(updates
         .iter()
@@ -674,10 +1033,41 @@ fn install_flatpak_application_impl(
     remote: String,
     scope: String,
 ) -> Result<String, String> {
-    if !valid_package_id(&app_id) || !valid_package_id(&remote) {
-        return Err(String::from(
-            "invalid Flatpak application or remote identifier",
-        ));
+    if !valid_package_id(&app_id) {
+        return Err(String::from("invalid package identifier"));
+    }
+    if is_native_package_source(&remote) {
+        if !matches!(scope.as_str(), "system" | "user") {
+            return Err(String::from("invalid package installation scope"));
+        }
+        let matches_source = search_package_catalog_impl(app_id.clone())?
+            .iter()
+            .any(|entry| entry.app_id == app_id && entry.remote == remote);
+        if !matches_source {
+            return Err(format!(
+                "{app_id} is no longer available from {remote}; refresh the catalogue and try again."
+            ));
+        }
+        if scope == "user" {
+            return Err(format!(
+                "{remote} currently supports system package installations only."
+            ));
+        }
+        if remote == APT_SOURCE {
+            if !detect_package_managers().pkexec {
+                return Err(String::from(
+                    "pkexec is required to authorize APT package installation.",
+                ));
+            }
+            run_privileged_command("pkexec", &["apt-get", "install", "-y", "--", &app_id])?;
+        } else {
+            run_native_package_action(&app_id, &remote, PackageAction::Install)?;
+        }
+        invalidate_application_cache()?;
+        return Ok(format!("{app_id} was installed through {remote}."));
+    }
+    if !valid_package_id(&remote) {
+        return Err(String::from("invalid Flatpak remote identifier"));
     }
     if !matches!(scope.as_str(), "system" | "user") {
         return Err(String::from("invalid Flatpak installation scope"));
@@ -726,6 +1116,13 @@ fn install_flatpak_application_impl(
 
     invalidate_application_cache()?;
     Ok(format!("{} was installed successfully.", app.name))
+}
+
+fn is_native_package_source(source: &str) -> bool {
+    matches!(
+        source,
+        APT_SOURCE | DNF_SOURCE | PACMAN_SOURCE | ZYPPER_SOURCE | SNAP_SOURCE
+    )
 }
 
 #[tauri::command]
@@ -810,11 +1207,68 @@ fn perform_package_action_impl(app_id: String, action: String) -> Result<String,
         APT_SOURCE => run_apt_action(package_name, action)?,
         FLATPAK_SOURCE => run_flatpak_action(package_name, app.package_scope.as_deref(), action)?,
         SNAP_SOURCE => run_snap_action(package_name, action)?,
+        DNF_SOURCE | ZYPPER_SOURCE | PACMAN_SOURCE => {
+            run_native_package_action(package_name, &app.source, action)?
+        }
         source => {
             return Err(format!(
                 "package operations are not supported for {source} applications"
             ))
         }
+    }
+
+    #[tauri::command]
+    async fn reinstall_package(app_id: String) -> Result<String, String> {
+        tauri::async_runtime::spawn_blocking(move || reinstall_package_impl(app_id))
+            .await
+            .map_err(|error| format!("package reinstall task failed: {error}"))?
+    }
+
+    fn reinstall_package_impl(app_id: String) -> Result<String, String> {
+        let app = scan_applications_uncached()?
+            .into_iter()
+            .find(|entry| entry.id == app_id)
+            .ok_or_else(|| {
+                "application is no longer installed; refresh and try again.".to_string()
+            })?;
+        let package_name = app
+            .package_name
+            .as_deref()
+            .filter(|name| valid_package_id(name))
+            .ok_or_else(|| format!("AppPilot cannot verify the package for {}.", app.name))?;
+
+        match app.source.as_str() {
+            APT_SOURCE => run_privileged_command(
+                "pkexec",
+                &["apt-get", "install", "--reinstall", "-y", "--", package_name],
+            )?,
+            DNF_SOURCE => run_privileged_command(
+                "pkexec",
+                &["dnf", "reinstall", "-y", "--", package_name],
+            )?,
+            PACMAN_SOURCE => run_privileged_command(
+                "pkexec",
+                &["pacman", "-S", "--noconfirm", "--", package_name],
+            )?,
+            ZYPPER_SOURCE => run_privileged_command(
+                "pkexec",
+                &[
+                    "zypper",
+                    "--non-interactive",
+                    "install",
+                    "--force",
+                    "--",
+                    package_name,
+                ],
+            )?,
+            source => {
+                return Err(format!(
+                    "Reinstall is not supported for {source}; AppPilot cannot safely target only this package with that provider."
+                ))
+            }
+        }
+        invalidate_application_cache()?;
+        Ok(format!("{} was reinstalled.", app.name))
     }
 
     invalidate_application_cache()?;
@@ -851,6 +1305,9 @@ fn update_package_impl(package_name: String, source: String) -> Result<String, S
             run_flatpak_action(&package_name, Some(&scope), PackageAction::Update)?;
         }
         SNAP_SOURCE => run_snap_action(&package_name, PackageAction::Update)?,
+        DNF_SOURCE | ZYPPER_SOURCE | PACMAN_SOURCE => {
+            run_native_package_action(&package_name, &source, PackageAction::Update)?
+        }
         _ => return Err(format!("updates from {source} are not supported")),
     }
     invalidate_application_cache()?;
@@ -881,6 +1338,7 @@ fn run_apt_action(package_name: &str, action: PackageAction) -> Result<(), Strin
             "--",
             package_name,
         ],
+        PackageAction::Install => vec!["apt-get", "install", "-y", "--", package_name],
     };
     run_privileged_command("pkexec", &arguments)
 }
@@ -895,6 +1353,11 @@ fn run_flatpak_action(
     let mut arguments = match action {
         PackageAction::Remove => vec!["uninstall"],
         PackageAction::Update => vec!["update"],
+        PackageAction::Install => {
+            return Err(String::from(
+                "Flatpak installation must be verified against a configured remote.",
+            ))
+        }
     };
     let privileged;
     if scope == "system" {
@@ -942,8 +1405,77 @@ fn run_snap_action(package_name: &str, action: PackageAction) -> Result<(), Stri
     let verb = match action {
         PackageAction::Remove => "remove",
         PackageAction::Update => "refresh",
+        PackageAction::Install => "install",
     };
     run_privileged_command("pkexec", &["snap", verb, package_name])
+}
+
+fn run_native_package_action(
+    package_name: &str,
+    source: &str,
+    action: PackageAction,
+) -> Result<(), String> {
+    if !valid_package_id(package_name) {
+        return Err(String::from("invalid package identifier"));
+    }
+    let managers = detect_package_managers();
+    if source == SNAP_SOURCE {
+        return match action {
+            PackageAction::Install if managers.snap && managers.pkexec => {
+                run_privileged_command("pkexec", &["snap", "install", package_name])
+            }
+            PackageAction::Install if !managers.snap => {
+                Err(String::from("Snap is not available on this system."))
+            }
+            PackageAction::Install => Err(String::from(
+                "pkexec is required to authorize Snap package installation.",
+            )),
+            other => run_snap_action(package_name, other),
+        };
+    }
+    let (manager, arguments): (&str, Vec<&str>) = match (source, action) {
+        (DNF_SOURCE, PackageAction::Install) if managers.dnf => {
+            ("dnf", vec!["install", "-y", "--", package_name])
+        }
+        (DNF_SOURCE, PackageAction::Remove) if managers.dnf => {
+            ("dnf", vec!["remove", "-y", "--", package_name])
+        }
+        (DNF_SOURCE, PackageAction::Update) if managers.dnf => {
+            ("dnf", vec!["upgrade", "-y", "--", package_name])
+        }
+        (ZYPPER_SOURCE, PackageAction::Install) if managers.zypper => (
+            "zypper",
+            vec!["--non-interactive", "install", "--", package_name],
+        ),
+        (ZYPPER_SOURCE, PackageAction::Remove) if managers.zypper => (
+            "zypper",
+            vec!["--non-interactive", "remove", "--", package_name],
+        ),
+        (ZYPPER_SOURCE, PackageAction::Update) if managers.zypper => (
+            "zypper",
+            vec!["--non-interactive", "update", "--", package_name],
+        ),
+        (PACMAN_SOURCE, PackageAction::Install | PackageAction::Update) if managers.pacman => (
+            "pacman",
+            vec!["-S", "--needed", "--noconfirm", "--", package_name],
+        ),
+        (PACMAN_SOURCE, PackageAction::Remove) if managers.pacman => {
+            ("pacman", vec!["-R", "--noconfirm", "--", package_name])
+        }
+        _ => {
+            return Err(format!(
+                "{source} does not support this package action on the current system."
+            ))
+        }
+    };
+    if !managers.pkexec {
+        return Err(format!(
+            "pkexec is required to authorize {source} package operations."
+        ));
+    }
+    let mut command = vec![manager];
+    command.extend(arguments);
+    run_privileged_command("pkexec", &command)
 }
 
 fn run_privileged_command(program: &str, arguments: &[&str]) -> Result<(), String> {
@@ -1025,12 +1557,24 @@ fn scan_applications_uncached() -> Result<Vec<AppRecord>, String> {
         .map(|(_, path, _)| path.clone())
         .collect();
     let dpkg_owners = dpkg_packages_for_paths(&system_paths);
+    let rpm_owners = if managers.dnf || managers.zypper {
+        rpm_packages_for_paths(&system_paths)?
+    } else {
+        HashMap::new()
+    };
+    let pacman_owners = if managers.pacman {
+        pacman_packages_for_paths(&system_paths)?
+    } else {
+        HashMap::new()
+    };
 
     for (desktop_id, path, parsed) in candidates {
         if registry.contains_key(&desktop_id) {
             continue;
         }
         let dpkg_owner = dpkg_owners.get(&path).cloned();
+        let rpm_owner = rpm_owners.get(&path).cloned();
+        let pacman_owner = pacman_owners.get(&path).cloned();
         let flatpak_id = parsed
             .package_name
             .clone()
@@ -1049,6 +1593,18 @@ fn scan_applications_uncached() -> Result<Vec<AppRecord>, String> {
 
         let (source, package_name, package_scope) = if let Some(package) = dpkg_owner {
             (APT_SOURCE, Some(package), None)
+        } else if let Some(package) = rpm_owner {
+            (
+                if managers.dnf {
+                    DNF_SOURCE
+                } else {
+                    ZYPPER_SOURCE
+                },
+                Some(package),
+                None,
+            )
+        } else if let Some(package) = pacman_owner {
+            (PACMAN_SOURCE, Some(package), None)
         } else if let Some(package) = flatpak_id {
             (
                 FLATPAK_SOURCE,
@@ -1283,6 +1839,50 @@ fn dpkg_packages_for_paths(paths: &[PathBuf]) -> HashMap<PathBuf, String> {
     owners
 }
 
+fn rpm_packages_for_paths(paths: &[PathBuf]) -> Result<HashMap<PathBuf, String>, String> {
+    let output = run_command("rpm", &["-qa", "--qf", "[%{FILENAMES}\\t%{NAME}\\n]"])?;
+    ensure_success("RPM application ownership scan", &output)?;
+    Ok(parse_rpm_owner_output(
+        &String::from_utf8_lossy(&output.stdout),
+        paths,
+    ))
+}
+
+fn parse_rpm_owner_output(output: &str, paths: &[PathBuf]) -> HashMap<PathBuf, String> {
+    let wanted: HashSet<PathBuf> = paths.iter().cloned().collect();
+    output
+        .lines()
+        .filter_map(|line| {
+            let (path, package) = line.split_once('\t')?;
+            let path = PathBuf::from(path);
+            (wanted.contains(&path) && valid_package_id(package))
+                .then_some((path, package.to_string()))
+        })
+        .collect()
+}
+
+fn pacman_packages_for_paths(paths: &[PathBuf]) -> Result<HashMap<PathBuf, String>, String> {
+    let output = run_command("pacman", &["-Ql"])?;
+    ensure_success("Pacman application ownership scan", &output)?;
+    Ok(parse_pacman_owner_output(
+        &String::from_utf8_lossy(&output.stdout),
+        paths,
+    ))
+}
+
+fn parse_pacman_owner_output(output: &str, paths: &[PathBuf]) -> HashMap<PathBuf, String> {
+    let wanted: HashSet<PathBuf> = paths.iter().cloned().collect();
+    output
+        .lines()
+        .filter_map(|line| {
+            let (package, path) = line.split_once(' ')?;
+            let path = PathBuf::from(path.trim());
+            (wanted.contains(&path) && valid_package_id(package))
+                .then_some((path, package.to_string()))
+        })
+        .collect()
+}
+
 fn parse_dpkg_owner_line(line: &str) -> Option<(PathBuf, String)> {
     let (package_field, path_field) = line.split_once(": ")?;
     let package = package_field
@@ -1353,6 +1953,161 @@ fn parse_flatpak_catalog(
         .collect()
 }
 
+fn make_catalog_entry(
+    id: &str,
+    name: &str,
+    description: &str,
+    version: &str,
+    source: &str,
+    installed: &HashSet<(String, String)>,
+) -> Option<FlatpakCatalogEntry> {
+    if !valid_package_id(id) || name.trim().is_empty() {
+        return None;
+    }
+    Some(FlatpakCatalogEntry {
+        app_id: id.trim().to_string(),
+        name: name.trim().to_string(),
+        description: description.trim().to_string(),
+        version: version.trim().to_string(),
+        remote: source.to_string(),
+        scope: "system".to_string(),
+        installed: installed.contains(&(id.trim().to_string(), source.to_string())),
+    })
+}
+
+fn parse_apt_search(
+    output: &str,
+    query: &str,
+    installed: &HashSet<(String, String)>,
+) -> Vec<FlatpakCatalogEntry> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (package, description) = line.split_once(" - ")?;
+            make_catalog_entry(package, package, description, "", APT_SOURCE, installed)
+        })
+        .filter(|entry| {
+            let query = query.to_lowercase();
+            entry.name.to_lowercase().contains(&query)
+                || entry.description.to_lowercase().contains(&query)
+        })
+        .collect()
+}
+
+fn parse_dnf_search(
+    output: &str,
+    query: &str,
+    installed: &HashSet<(String, String)>,
+) -> Vec<FlatpakCatalogEntry> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (name_arch, description) = line.split_once(" : ")?;
+            let name = name_arch
+                .split_once('.')
+                .map(|(name, arch)| {
+                    if matches!(arch, "x86_64" | "aarch64" | "noarch" | "i686" | "i386") {
+                        name
+                    } else {
+                        name_arch
+                    }
+                })
+                .unwrap_or(name_arch)
+                .trim();
+            make_catalog_entry(name, name, description, "", DNF_SOURCE, installed)
+        })
+        .filter(|entry| {
+            let query = query.to_lowercase();
+            entry.name.to_lowercase().contains(&query)
+                || entry.description.to_lowercase().contains(&query)
+        })
+        .collect()
+}
+
+fn parse_pacman_search(
+    output: &str,
+    query: &str,
+    installed: &HashSet<(String, String)>,
+) -> Vec<FlatpakCatalogEntry> {
+    let mut entries = Vec::new();
+    let mut lines = output.lines();
+    while let Some(package_line) = lines.next() {
+        let Some((_, name_version)) = package_line.split_once('/') else {
+            continue;
+        };
+        let mut fields = name_version.split_whitespace();
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        let Some(version) = fields.next() else {
+            continue;
+        };
+        let description = lines.next().unwrap_or_default().trim();
+        if let Some(entry) =
+            make_catalog_entry(name, name, description, version, PACMAN_SOURCE, installed)
+        {
+            let query = query.to_lowercase();
+            if entry.name.to_lowercase().contains(&query)
+                || entry.description.to_lowercase().contains(&query)
+            {
+                entries.push(entry);
+            }
+        }
+    }
+    entries
+}
+
+fn parse_zypper_search(
+    output: &str,
+    query: &str,
+    installed: &HashSet<(String, String)>,
+) -> Vec<FlatpakCatalogEntry> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split('|').map(str::trim).collect();
+            if fields.len() < 4 || fields[0].is_empty() || fields[0] == "S" {
+                return None;
+            }
+            make_catalog_entry(
+                fields[2],
+                fields[2],
+                fields[3],
+                "",
+                ZYPPER_SOURCE,
+                installed,
+            )
+        })
+        .filter(|entry| {
+            let query = query.to_lowercase();
+            entry.name.to_lowercase().contains(&query)
+                || entry.description.to_lowercase().contains(&query)
+        })
+        .collect()
+}
+
+fn parse_snap_search(
+    output: &str,
+    query: &str,
+    installed: &HashSet<(String, String)>,
+) -> Vec<FlatpakCatalogEntry> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 3 || fields[0] == "Name" {
+                return None;
+            }
+            make_catalog_entry(fields[0], fields[0], "", fields[1], SNAP_SOURCE, installed)
+        })
+        .filter(|entry| {
+            let query = query.to_lowercase();
+            entry.name.to_lowercase().contains(&query)
+                || entry.app_id.to_lowercase().contains(&query)
+        })
+        .collect()
+}
+
 fn flatpak_scope_for(installed: &HashSet<(String, String)>, app_id: &str) -> Option<String> {
     ["system", "user"]
         .into_iter()
@@ -1385,6 +2140,9 @@ fn snap_packages(managers: &PackageManagerStatus) -> Result<HashSet<String>, Str
 fn detect_package_managers() -> PackageManagerStatus {
     PackageManagerStatus {
         apt: executable_in_path("apt"),
+        dnf: executable_in_path("dnf"),
+        pacman: executable_in_path("pacman"),
+        zypper: executable_in_path("zypper"),
         flatpak: executable_in_path("flatpak"),
         snap: executable_in_path("snap"),
         pkexec: executable_in_path("pkexec"),
@@ -1433,6 +2191,9 @@ pub fn run() {
             scan_startup_entries,
             scan_running_processes,
             get_package_updates,
+            get_package_cache_status,
+            clean_package_cache,
+            get_system_diagnostics,
             update_all_packages,
             list_flatpak_catalog,
             search_package_catalog,
@@ -1441,6 +2202,7 @@ pub fn run() {
             terminate_process,
             launch_application,
             perform_package_action,
+            reinstall_package,
             update_package
         ])
         .setup(|app| {
@@ -1484,6 +2246,17 @@ mod tests {
     }
 
     #[test]
+    fn distinguishes_linux_package_sources_from_flatpak_remote_names() {
+        assert!(is_native_package_source(APT_SOURCE));
+        assert!(is_native_package_source(DNF_SOURCE));
+        assert!(is_native_package_source(PACMAN_SOURCE));
+        assert!(is_native_package_source(ZYPPER_SOURCE));
+        assert!(is_native_package_source(SNAP_SOURCE));
+        assert!(!is_native_package_source(FLATPAK_SOURCE));
+        assert!(!is_native_package_source("flathub"));
+    }
+
+    #[test]
     fn parses_flatpak_catalog_entries_and_install_scope() {
         let installed = HashSet::from([(String::from("org.example.Editor"), String::from("user"))]);
         let output = concat!(
@@ -1500,6 +2273,75 @@ mod tests {
         assert_eq!(entries[1].description, "");
         assert!(!entries[1].installed);
         assert!(parse_flatpak_catalog(output, "invalid", &installed).is_empty());
+    }
+
+    #[test]
+    fn parses_multi_provider_search_results_without_confusing_sources() {
+        let installed = HashSet::from([(String::from("firefox"), APT_SOURCE.to_string())]);
+        let apt = parse_apt_search(
+            "firefox - Mozilla Firefox web browser\ninvalid package - ignored\n",
+            "firefox",
+            &installed,
+        );
+        assert_eq!(apt.len(), 1);
+        assert!(apt[0].installed);
+        assert_eq!(apt[0].remote, APT_SOURCE);
+
+        let dnf = parse_dnf_search(
+            "firefox.x86_64 : Mozilla Firefox web browser\n",
+            "firefox",
+            &installed,
+        );
+        assert_eq!(dnf.len(), 1);
+        assert_eq!(dnf[0].app_id, "firefox");
+        assert!(!dnf[0].installed);
+
+        let pacman = parse_pacman_search(
+            "extra/firefox 136.0-1\n    Mozilla Firefox web browser\n",
+            "firefox",
+            &installed,
+        );
+        assert_eq!(pacman.len(), 1);
+        assert_eq!(pacman[0].version, "136.0-1");
+
+        let zypper = parse_zypper_search(
+            concat!(
+                "S | Repository | Name | Summary | Type\n",
+                "  | repo-oss | firefox | Mozilla Firefox web browser | package\n"
+            ),
+            "firefox",
+            &installed,
+        );
+        assert_eq!(zypper.len(), 1);
+        assert_eq!(zypper[0].description, "Mozilla Firefox web browser");
+
+        let snap = parse_snap_search(
+            "Name Version Publisher Notes\nfirefox 136.0 mozilla -\n",
+            "firefox",
+            &installed,
+        );
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].remote, SNAP_SOURCE);
+    }
+
+    #[test]
+    fn matches_rpm_and_pacman_file_owners_only_to_requested_desktop_entries() {
+        let target = PathBuf::from("/usr/share/applications/editor.desktop");
+        let other = PathBuf::from("/usr/share/applications/other.desktop");
+        let wanted = [target.clone()];
+        let rpm = parse_rpm_owner_output(
+            "/usr/share/applications/editor.desktop\teditor\n/usr/share/applications/other.desktop\tother\n",
+            &wanted,
+        );
+        assert_eq!(rpm.get(&target), Some(&String::from("editor")));
+        assert!(!rpm.contains_key(&other));
+
+        let pacman = parse_pacman_owner_output(
+            "editor /usr/share/applications/editor.desktop\nother /usr/share/applications/other.desktop\n",
+            &wanted,
+        );
+        assert_eq!(pacman.get(&target), Some(&String::from("editor")));
+        assert!(!pacman.contains_key(&other));
     }
 
     #[test]
