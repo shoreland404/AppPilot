@@ -25,8 +25,8 @@ type AppRecord = {
 
 type Overview = {
   installed_applications: number
-  startup_entries: number
-  running_processes: number
+  startup_entries: number | null
+  running_processes: number | null
   package_status: PackageStatus
 }
 
@@ -39,12 +39,15 @@ type StartupEntry = {
   id: string
   name: string
   path: string
+  enabled: boolean
+  can_manage: boolean
 }
 
 type ProcessInfo = {
   pid: number
   name: string
   memory_kb: number
+  can_terminate: boolean
 }
 
 type PackageUpdate = {
@@ -89,6 +92,17 @@ function getInitialTheme(): 'dark' | 'light' {
   return localStorage.getItem('apppilot-theme') === 'light' ? 'light' : 'dark'
 }
 
+function getInitialFavorites(): string[] {
+  const saved = localStorage.getItem('apppilot-favorites')
+  if (!saved) return []
+  try {
+    const parsed: unknown = JSON.parse(saved)
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : []
+  } catch {
+    return []
+  }
+}
+
 function formatMemory(memoryKb: number) {
   if (memoryKb >= 1024 * 1024) return `${(memoryKb / 1024 / 1024).toFixed(1)} GB`
   if (memoryKb >= 1024) return `${(memoryKb / 1024).toFixed(0)} MB`
@@ -105,12 +119,16 @@ function App() {
   const [startupEntries, setStartupEntries] = useState<StartupEntry[]>([])
   const [processes, setProcesses] = useState<ProcessInfo[]>([])
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null)
+  const [favoriteAppIds, setFavoriteAppIds] = useState<string[]>(getInitialFavorites)
   const [query, setQuery] = useState('')
   const [catalogQuery, setCatalogQuery] = useState('')
+  const [categoryFilter, setCategoryFilter] = useState('All categories')
+  const [favoritesOnly, setFavoritesOnly] = useState(false)
   const [sourceFilter, setSourceFilter] = useState('All sources')
   const [theme, setTheme] = useState<'dark' | 'light'>(getInitialTheme)
   const [loading, setLoading] = useState(nativeRuntime)
   const [pageLoading, setPageLoading] = useState(false)
+  const [bulkUpdating, setBulkUpdating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
@@ -120,11 +138,16 @@ function App() {
     localStorage.setItem('apppilot-theme', theme)
   }, [theme])
 
+  useEffect(() => {
+    localStorage.setItem('apppilot-favorites', JSON.stringify(favoriteAppIds))
+  }, [favoriteAppIds])
+
   const loadOverview = useCallback(async () => {
     try {
       const dashboard = await invoke<Dashboard>('get_dashboard_data')
       setOverview(dashboard.overview)
       setApps(dashboard.applications)
+      setFavoriteAppIds((current) => current.filter((id) => dashboard.applications.some((app) => app.id === id)))
       setSelectedAppId((current) => (current && dashboard.applications.some((app) => app.id === current) ? current : dashboard.applications[0]?.id ?? null))
       setError(null)
       setLastRefresh(new Date())
@@ -143,9 +166,13 @@ function App() {
       } else if (page === 'Updates') {
         setUpdates(await invoke<PackageUpdate[]>('get_package_updates'))
       } else if (page === 'Startup apps') {
-        setStartupEntries(await invoke<StartupEntry[]>('scan_startup_entries'))
+        const entries = await invoke<StartupEntry[]>('scan_startup_entries')
+        setStartupEntries(entries)
+        setOverview((current) => current ? { ...current, startup_entries: entries.filter((entry) => entry.enabled).length } : current)
       } else if (page === 'Processes') {
-        setProcesses(await invoke<ProcessInfo[]>('scan_running_processes'))
+        const items = await invoke<ProcessInfo[]>('scan_running_processes')
+        setProcesses(items)
+        setOverview((current) => current ? { ...current, running_processes: items.length } : current)
       }
       setError(null)
       setLastRefresh(new Date())
@@ -172,6 +199,10 @@ function App() {
     () => ['All sources', ...Array.from(new Set(apps.map((app) => app.source))).sort()],
     [apps],
   )
+  const categories = useMemo(
+    () => ['All categories', ...Array.from(new Set(apps.flatMap((app) => app.category.split(',').map((category) => category.trim()).filter(Boolean)))).sort()],
+    [apps],
+  )
   const filteredApps = useMemo(() => {
     const normalized = query.trim().toLowerCase()
     return apps.filter((app) => {
@@ -181,9 +212,14 @@ function App() {
         app.description.toLowerCase().includes(normalized) ||
         app.category.toLowerCase().includes(normalized) ||
         app.package_name?.toLowerCase().includes(normalized)
-      return matchesSearch && (sourceFilter === 'All sources' || app.source === sourceFilter)
+      const matchesCategory = categoryFilter === 'All categories' || app.category.split(',').some((category) => category.trim() === categoryFilter)
+      const matchesFavorite = !favoritesOnly || favoriteAppIds.includes(app.id)
+      return matchesSearch
+        && matchesCategory
+        && matchesFavorite
+        && (sourceFilter === 'All sources' || app.source === sourceFilter)
     })
-  }, [apps, query, sourceFilter])
+  }, [apps, categoryFilter, favoriteAppIds, favoritesOnly, query, sourceFilter])
   const filteredCatalog = useMemo(() => {
     const normalized = catalogQuery.trim().toLowerCase()
     if (!normalized) return catalog
@@ -194,6 +230,12 @@ function App() {
     )
   }, [catalog, catalogQuery])
   const selectedApp = apps.find((app) => app.id === selectedAppId) ?? null
+
+  const toggleFavorite = (appId: string) => {
+    setFavoriteAppIds((current) => current.includes(appId)
+      ? current.filter((id) => id !== appId)
+      : [...current, appId])
+  }
 
   const refresh = () => {
     if (page === 'Overview' || page === 'Applications') {
@@ -300,6 +342,23 @@ function App() {
     }
   }
 
+  const updateAllPackages = async () => {
+    if (!window.confirm(`Install all ${updates.length} updates reported by the configured package managers?`)) return
+    try {
+      setBulkUpdating(true)
+      const completed = await invoke<string[]>('update_all_packages')
+      setNotice(completed.length ? `Updated ${completed.length} packages.` : 'No updates were available.')
+      setError(null)
+      await loadCurrentPage()
+      await loadOverview()
+    } catch (updateError) {
+      setError(getErrorMessage(updateError))
+      setNotice(null)
+    } finally {
+      setBulkUpdating(false)
+    }
+  }
+
   const installCatalogApp = async (entry: FlatpakCatalogEntry) => {
     const scopeDescription = entry.scope === 'user' ? 'your user account' : 'all users on this system'
     if (!window.confirm(`Install ${entry.name} from ${entry.remote} for ${scopeDescription}?`)) return
@@ -320,6 +379,39 @@ function App() {
       await loadOverview()
     } catch (installError) {
       setError(getErrorMessage(installError))
+      setNotice(null)
+    } finally {
+      setPageLoading(false)
+    }
+  }
+
+  const toggleStartupEntry = async (entry: StartupEntry) => {
+    const nextEnabled = !entry.enabled
+    if (!window.confirm(`${nextEnabled ? 'Enable' : 'Disable'} ${entry.name} ${nextEnabled ? 'at' : 'on'} login?`)) return
+    try {
+      const message = await invoke<string>('set_startup_entry_enabled', { id: entry.id, enabled: nextEnabled })
+      setNotice(message)
+      setError(null)
+      const entries = await invoke<StartupEntry[]>('scan_startup_entries')
+      setStartupEntries(entries)
+      setOverview((current) => current ? { ...current, startup_entries: entries.filter((item) => item.enabled).length } : current)
+    } catch (startupError) {
+      setError(getErrorMessage(startupError))
+      setNotice(null)
+    }
+  }
+
+  const stopProcess = async (process: ProcessInfo) => {
+    if (!window.confirm(`Request termination of ${process.name} (PID ${process.pid})? Unsaved work may be lost.`)) return
+    try {
+      setPageLoading(true)
+      setNotice(await invoke<string>('terminate_process', { pid: process.pid }))
+      setError(null)
+      const items = await invoke<ProcessInfo[]>('scan_running_processes')
+      setProcesses(items)
+      setOverview((current) => current ? { ...current, running_processes: items.length } : current)
+    } catch (processError) {
+      setError(getErrorMessage(processError))
       setNotice(null)
     } finally {
       setPageLoading(false)
@@ -416,7 +508,7 @@ function App() {
               })}
             </div>
           </div>
-          <div className="sidebar-footnote">Local system data only</div>
+          <div className="sidebar-footnote">No background scans or telemetry</div>
         </div>
       </aside>
 
@@ -483,7 +575,14 @@ function App() {
               selectedId={selectedAppId}
               sources={sources}
               sourceFilter={sourceFilter}
+              categories={categories}
+              categoryFilter={categoryFilter}
+              favoritesOnly={favoritesOnly}
+              favoriteAppIds={favoriteAppIds}
               onFilter={setSourceFilter}
+              onCategoryFilter={setCategoryFilter}
+              onToggleFavorites={() => setFavoritesOnly((current) => !current)}
+              onToggleFavorite={toggleFavorite}
               onLaunch={openApplication}
               onManage={manageApplication}
               onUpdate={updateApplication}
@@ -504,15 +603,15 @@ function App() {
           ) : null}
 
           {page === 'Updates' ? (
-            <UpdatesPage error={error} loading={pageLoading} updates={updates} onUpdate={updatePackage} />
+            <UpdatesPage error={error} loading={pageLoading || bulkUpdating} updates={updates} onUpdate={updatePackage} onUpdateAll={updateAllPackages} />
           ) : null}
 
           {page === 'Startup apps' ? (
-            <StartupPage entries={startupEntries} error={error} loading={pageLoading} />
+            <StartupPage entries={startupEntries} error={error} loading={pageLoading} onToggle={toggleStartupEntry} />
           ) : null}
 
           {page === 'Processes' ? (
-            <ProcessesPage error={error} processes={processes} loading={pageLoading} />
+            <ProcessesPage error={error} processes={processes} loading={pageLoading} onStop={stopProcess} />
           ) : null}
 
           {page === 'Settings' ? (
@@ -592,8 +691,8 @@ function OverviewPage({
       </div>
       <section aria-label="System overview" className="metric-grid">
         <MetricCard label="Installed apps" value={loading ? null : overview?.installed_applications ?? null} loading={loading} icon="▦" detail="Desktop launchers found" tone="blue" />
-        <MetricCard label="Startup apps" value={loading ? null : overview?.startup_entries ?? null} loading={loading} icon="◷" detail="Enabled for your session" tone="violet" />
-        <MetricCard label="Running processes" value={loading ? null : overview?.running_processes ?? null} loading={loading} icon="⌘" detail="Visible in /proc right now" tone="green" />
+        <MetricCard label="Startup apps" value={loading ? null : overview?.startup_entries ?? null} loading={loading} icon="◷" detail="Scanned when you open this page" tone="violet" />
+        <MetricCard label="Running processes" value={loading ? null : overview?.running_processes ?? null} loading={loading} icon="⌘" detail="Scanned when you open this page" tone="green" />
       </section>
 
       <section className="section-block">
@@ -647,8 +746,9 @@ function MetricCard({ label, value, icon, detail, tone, loading }: {
 
 function ApplicationsPage({
   apps, allApps, error, loading, query, selectedApp, selectedId, sources, sourceFilter,
-  onFilter, onLaunch, onManage, onQuery, onSelect,
-  onUpdate,
+  categories, categoryFilter, favoritesOnly, favoriteAppIds,
+  onFilter, onLaunch, onManage, onQuery, onSelect, onUpdate,
+  onCategoryFilter, onToggleFavorites, onToggleFavorite,
 }: {
   apps: AppRecord[]
   allApps: AppRecord[]
@@ -659,7 +759,14 @@ function ApplicationsPage({
   selectedId: string | null
   sources: string[]
   sourceFilter: string
+  categories: string[]
+  categoryFilter: string
+  favoritesOnly: boolean
+  favoriteAppIds: string[]
   onFilter: (source: string) => void
+  onCategoryFilter: (category: string) => void
+  onToggleFavorites: () => void
+  onToggleFavorite: (id: string) => void
   onLaunch: (app: AppRecord) => void
   onManage: (app: AppRecord) => void
   onUpdate: (app: AppRecord) => void
@@ -683,6 +790,20 @@ function ApplicationsPage({
                 {sources.map((source) => <option key={source} value={source}>{source}</option>)}
               </select>
             </label>
+            <label className="select-control">
+              <span className="sr-only">Filter by category</span>
+              <select onChange={(event) => onCategoryFilter(event.target.value)} value={categoryFilter}>
+                {categories.map((category) => <option key={category} value={category}>{category}</option>)}
+              </select>
+            </label>
+            <button
+              aria-pressed={favoritesOnly}
+              className={`secondary-button favorites-filter${favoritesOnly ? ' active' : ''}`}
+              onClick={onToggleFavorites}
+              type="button"
+            >
+              <span aria-hidden="true">★</span> Favorites ({favoriteAppIds.length})
+            </button>
           </div>
         </div>
         <div className="application-layout">
@@ -723,6 +844,15 @@ function ApplicationsPage({
               </dl>
               <button className="primary-button launch-button" onClick={() => onLaunch(selectedApp)} type="button">
                 <span>▶</span> Launch application
+              </button>
+              <button
+                aria-pressed={favoriteAppIds.includes(selectedApp.id)}
+                className={`secondary-button favorite-toggle${favoriteAppIds.includes(selectedApp.id) ? ' active' : ''}`}
+                onClick={() => onToggleFavorite(selectedApp.id)}
+                type="button"
+              >
+                <span aria-hidden="true">{favoriteAppIds.includes(selectedApp.id) ? '★' : '☆'}</span>
+                {favoriteAppIds.includes(selectedApp.id) ? 'Remove from favorites' : 'Add to favorites'}
               </button>
               {selectedApp.package_name && ['APT', 'Flatpak', 'Snap'].includes(selectedApp.source) ? (
                 <div className="detail-actions">
@@ -817,15 +947,21 @@ function DiscoverPage({
   )
 }
 
-function UpdatesPage({ updates, loading, error, onUpdate }: {
+function UpdatesPage({ updates, loading, error, onUpdate, onUpdateAll }: {
   updates: PackageUpdate[]
   loading: boolean
   error: string | null
   onUpdate: (update: PackageUpdate) => void
+  onUpdateAll: () => void
 }) {
   return (
     <>
-      <PageHeading eyebrow="SOFTWARE MAINTENANCE" title="Updates" description="Available updates reported by the package managers installed on this system." />
+      <PageHeading
+        eyebrow="SOFTWARE MAINTENANCE"
+        title="Updates"
+        description="Available updates reported by the package managers installed on this system."
+        action={updates.length > 0 ? <button className="primary-button" disabled={loading} onClick={onUpdateAll} type="button">Update all ({updates.length})</button> : undefined}
+      />
       <section className="content-card">
         <div className="list-heading"><div><h2>Available updates</h2><p>Read directly from APT, Flatpak and Snap.</p></div><span className="result-count">{loading ? 'Checking…' : updates.length}</span></div>
         {loading ? <LoadingState label="Checking configured package sources…" /> : error ? (
@@ -849,12 +985,17 @@ function UpdatesPage({ updates, loading, error, onUpdate }: {
   )
 }
 
-function StartupPage({ entries, loading, error }: { entries: StartupEntry[]; loading: boolean; error: string | null }) {
+function StartupPage({ entries, loading, error, onToggle }: {
+  entries: StartupEntry[]
+  loading: boolean
+  error: string | null
+  onToggle: (entry: StartupEntry) => void
+}) {
   return (
     <>
-      <PageHeading eyebrow="SESSION CONFIGURATION" title="Startup apps" description="Enabled desktop entries configured to run when your Linux session starts." />
+      <PageHeading eyebrow="SESSION CONFIGURATION" title="Startup apps" description="Inspect startup entries and control user-owned launchers. System entries are read-only." />
       <section className="content-card">
-        <div className="list-heading"><div><h2>Enabled at login</h2><p>Read from your user and system autostart folders.</p></div><span className="result-count">{loading ? '…' : entries.length}</span></div>
+        <div className="list-heading"><div><h2>Session startup</h2><p>Read from your user and system autostart folders.</p></div><span className="result-count">{loading ? '…' : entries.length}</span></div>
         {loading ? <LoadingState label="Reading autostart entries…" /> : error ? (
           <EmptyState title="Startup inventory is unavailable" description="Resolve the backend error above and refresh the scan." />
         ) : entries.length === 0 ? (
@@ -865,7 +1006,11 @@ function StartupPage({ entries, loading, error }: { entries: StartupEntry[]; loa
               <div className="data-row" key={entry.id}>
                 <AppGlyph name={entry.name} />
                 <div className="data-row-main"><strong>{entry.name}</strong><small className="path-value" title={entry.path}>{entry.path}</small></div>
-                <span className="enabled-tag"><i />Enabled</span>
+                {entry.can_manage ? (
+                  <button className={`secondary-button startup-toggle${entry.enabled ? '' : ' disabled'}`} disabled={loading} onClick={() => onToggle(entry)} type="button">
+                    {entry.enabled ? 'Disable' : 'Enable'}
+                  </button>
+                ) : <span className={entry.enabled ? 'enabled-tag' : 'source-tag'}>{entry.enabled ? <><i />Enabled · system</> : 'Disabled · system'}</span>}
               </div>
             ))}
           </div>
@@ -875,7 +1020,12 @@ function StartupPage({ entries, loading, error }: { entries: StartupEntry[]; loa
   )
 }
 
-function ProcessesPage({ processes, loading, error }: { processes: ProcessInfo[]; loading: boolean; error: string | null }) {
+function ProcessesPage({ processes, loading, error, onStop }: {
+  processes: ProcessInfo[]
+  loading: boolean
+  error: string | null
+  onStop: (process: ProcessInfo) => void
+}) {
   return (
     <>
       <PageHeading eyebrow="LIVE SYSTEM ACTIVITY" title="Processes" description="Processes currently visible to your user, read from the Linux /proc filesystem." />
@@ -888,13 +1038,14 @@ function ProcessesPage({ processes, loading, error }: { processes: ProcessInfo[]
         ) : (
           <div className="process-table-wrap">
             <table className="process-table">
-              <thead><tr><th>Process</th><th>PID</th><th>Memory (RSS)</th></tr></thead>
+              <thead><tr><th>Process</th><th>PID</th><th>Memory (RSS)</th><th>Action</th></tr></thead>
               <tbody>
                 {processes.slice(0, 150).map((process) => (
                   <tr key={process.pid}>
                     <td><span className="process-name"><i />{process.name}</span></td>
                     <td className="numeric-cell">{process.pid}</td>
                     <td className="numeric-cell">{formatMemory(process.memory_kb)}</td>
+                    <td><button aria-label={`Stop ${process.name}, PID ${process.pid}`} className="process-stop" disabled={loading || !process.can_terminate} onClick={() => onStop(process)} title={process.can_terminate ? 'Request graceful termination' : 'Only processes owned by your user can be stopped'} type="button">Stop</button></td>
                   </tr>
                 ))}
               </tbody>

@@ -8,10 +8,16 @@ AppPilot is a native Linux desktop application manager built with Tauri 2, React
 - Identifies APT ownership from `dpkg-query` and recognizes installed Flatpak and Snap applications from their own local inventories.
 - Launches installed applications through the desktop-entry system (`gio launch`).
 - Browses applications available from the Flatpak remotes already configured on the computer and installs them with an explicit confirmation.
-- Reads enabled XDG startup entries and live process names / resident memory from `/proc`.
+- Saves an application favourites list and filters the library by source and desktop category.
+- Reads XDG startup entries and live process names / resident memory from `/proc`; user-owned startup entries can be enabled or disabled.
+- Can request graceful termination of a process owned by the current user, with confirmation.
 - Checks for available APT, Flatpak, and Snap updates using the installed package-manager tools.
-- Supports update and removal for packages it can verify; removal requires confirmation and privileged work goes through the system authorization prompt.
+- Supports per-package and grouped updates, plus removal for packages it can verify; destructive actions require confirmation and privileged work goes through the system authorization prompt.
 - Offers dark and light themes, with the selection saved locally in the app.
+
+## Performance
+
+AppPilot does not scan processes or startup folders during its initial launch. Those inventories are loaded only when their pages are opened. Desktop package ownership is queried in batches, and the discovered application list is cached in memory for one minute. Package-manager and filesystem work runs off the UI thread; there are no periodic background scans.
 
 Package metadata is deliberately conservative. Launchers whose package owner cannot be proven are labelled `System` or `Local`, and package actions remain unavailable for them.
 

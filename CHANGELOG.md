@@ -7,6 +7,11 @@ Notable changes to AppPilot are recorded here.
 - Added a searchable Flatpak catalogue sourced from configured user and system remotes.
 - Added confirmed Flatpak installation with live package verification and scope-aware authorization.
 - Added downloadable AppImage artifacts to manually triggered GitHub release builds.
+- Reduced launch work by deferring process and startup scans, batching APT ownership lookups, and caching the application inventory.
+- Added persistent favourites and application filters for source and desktop category.
+- Added controls for enabling or disabling user-owned startup entries.
+- Added confirmed graceful termination for processes owned by the current user.
+- Added grouped, one-confirmation updates across supported package managers.
 
 ## 0.1.0
 

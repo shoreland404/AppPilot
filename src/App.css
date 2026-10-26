@@ -804,6 +804,9 @@
 
 .library-filters {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
   gap: 7px;
 }
 
@@ -879,6 +882,18 @@
 .application-row.selected {
   border-color: rgba(124, 154, 244, 0.15);
   background: var(--accent-wash);
+}
+
+.favorites-filter,
+.favorite-toggle {
+  flex: 0 0 auto;
+}
+
+.favorites-filter.active,
+.favorite-toggle.active {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  background: var(--accent-wash);
+  color: var(--accent);
 }
 
 .application-row-copy {
@@ -1076,6 +1091,11 @@
   opacity: 0.48;
 }
 
+.primary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .detail-actions {
   display: flex;
   align-items: center;
@@ -1261,6 +1281,37 @@
 
 .update-button {
   min-width: 63px;
+}
+
+.startup-toggle {
+  min-width: 66px;
+}
+
+.startup-toggle.disabled {
+  border-color: color-mix(in srgb, var(--success) 38%, var(--border));
+  color: var(--success);
+}
+
+.process-stop {
+  min-width: 52px;
+  min-height: 25px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+  border-radius: 6px;
+  background: transparent;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 8px;
+  font-weight: 600;
+}
+
+.process-stop:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.process-stop:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .process-table-wrap {

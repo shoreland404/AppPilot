@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -30,8 +33,8 @@ pub struct PackageManagerStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppOverview {
     pub installed_applications: usize,
-    pub startup_entries: usize,
-    pub running_processes: usize,
+    pub startup_entries: Option<usize>,
+    pub running_processes: Option<usize>,
     pub package_status: PackageManagerStatus,
 }
 
@@ -46,6 +49,7 @@ pub struct ProcessInfo {
     pub pid: u32,
     pub name: String,
     pub memory_kb: u64,
+    pub can_terminate: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +57,8 @@ pub struct StartupEntry {
     pub id: String,
     pub name: String,
     pub path: String,
+    pub enabled: bool,
+    pub can_manage: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,18 +100,24 @@ const FLATPAK_SOURCE: &str = "Flatpak";
 const SNAP_SOURCE: &str = "Snap";
 const LOCAL_SOURCE: &str = "Local";
 const SYSTEM_SOURCE: &str = "System";
+const APPLICATION_CACHE_TTL: Duration = Duration::from_secs(60);
+static APPLICATION_CACHE: OnceLock<Mutex<Option<(Instant, Vec<AppRecord>)>>> = OnceLock::new();
 
 #[tauri::command]
-fn get_dashboard_data() -> Result<DashboardData, String> {
+async fn get_dashboard_data() -> Result<DashboardData, String> {
+    tauri::async_runtime::spawn_blocking(get_dashboard_data_impl)
+        .await
+        .map_err(|error| format!("application inventory task failed: {error}"))?
+}
+
+fn get_dashboard_data_impl() -> Result<DashboardData, String> {
     let applications = scan_applications()?;
-    let startup_entries = scan_startup_entries()?;
-    let running_processes = scan_running_processes()?;
 
     Ok(DashboardData {
         overview: AppOverview {
             installed_applications: applications.len(),
-            startup_entries: startup_entries.len(),
-            running_processes: running_processes.len(),
+            startup_entries: None,
+            running_processes: None,
             package_status: detect_package_managers(),
         },
         applications,
@@ -113,7 +125,13 @@ fn get_dashboard_data() -> Result<DashboardData, String> {
 }
 
 #[tauri::command]
-fn scan_startup_entries() -> Result<Vec<StartupEntry>, String> {
+async fn scan_startup_entries() -> Result<Vec<StartupEntry>, String> {
+    tauri::async_runtime::spawn_blocking(scan_startup_entries_impl)
+        .await
+        .map_err(|error| format!("startup inventory task failed: {error}"))?
+}
+
+fn scan_startup_entries_impl() -> Result<Vec<StartupEntry>, String> {
     let home =
         dirs::home_dir().ok_or_else(|| String::from("could not determine the home directory"))?;
     let directories = [
@@ -139,13 +157,24 @@ fn scan_startup_entries() -> Result<Vec<StartupEntry>, String> {
                 continue;
             };
 
-            if let Some((name, path)) = parsed {
+            if let Some((name, path, enabled)) = parsed {
+                if !enabled && !is_user_startup_path(&path) {
+                    continue;
+                }
+                let id = path
+                    .strip_prefix(home.join(".config/autostart"))
+                    .ok()
+                    .and_then(Path::to_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| file_name.to_string());
                 entries.insert(
-                    file_name.to_string(),
+                    id.clone(),
                     StartupEntry {
-                        id: file_name.to_string(),
+                        id,
                         name,
                         path: path.display().to_string(),
+                        enabled,
+                        can_manage: is_user_startup_path(&path),
                     },
                 );
             }
@@ -158,11 +187,21 @@ fn scan_startup_entries() -> Result<Vec<StartupEntry>, String> {
 }
 
 #[tauri::command]
-fn scan_running_processes() -> Result<Vec<ProcessInfo>, String> {
+async fn scan_running_processes() -> Result<Vec<ProcessInfo>, String> {
+    tauri::async_runtime::spawn_blocking(scan_running_processes_impl)
+        .await
+        .map_err(|error| format!("process inventory task failed: {error}"))?
+}
+
+fn scan_running_processes_impl() -> Result<Vec<ProcessInfo>, String> {
     let proc_directory = Path::new("/proc");
     let read_dir =
         fs::read_dir(proc_directory).map_err(|error| format!("could not read /proc: {error}"))?;
     let mut processes = Vec::new();
+    let current_status = fs::read_to_string("/proc/self/status")
+        .map_err(|error| format!("could not verify the current user: {error}"))?;
+    let current_uid = effective_uid(&current_status)
+        .ok_or_else(|| String::from("could not verify the current user"))?;
 
     for entry in read_dir {
         let entry = entry.map_err(|error| format!("could not inspect /proc entry: {error}"))?;
@@ -194,11 +233,15 @@ fn scan_running_processes() -> Result<Vec<ProcessInfo>, String> {
         let Some(name) = name.filter(|name| !name.is_empty()) else {
             continue;
         };
+        let Some(owner_uid) = effective_uid(&status) else {
+            continue;
+        };
 
         processes.push(ProcessInfo {
             pid,
             name,
             memory_kb,
+            can_terminate: owner_uid == current_uid && pid > 1 && pid != std::process::id(),
         });
     }
 
@@ -211,8 +254,183 @@ fn scan_running_processes() -> Result<Vec<ProcessInfo>, String> {
     Ok(processes)
 }
 
+fn terminate_process_impl(pid: u32) -> Result<String, String> {
+    if pid <= 1 || pid == std::process::id() {
+        return Err(String::from(
+            "this process cannot be terminated by AppPilot",
+        ));
+    }
+    let process_status = fs::read_to_string(format!("/proc/{pid}/status"))
+        .map_err(|error| format!("process {pid} is no longer available: {error}"))?;
+    let current_status = fs::read_to_string("/proc/self/status")
+        .map_err(|error| format!("could not verify the current user: {error}"))?;
+    let process_uid = effective_uid(&process_status)
+        .ok_or_else(|| format!("could not verify ownership of process {pid}"))?;
+    let current_uid = effective_uid(&current_status)
+        .ok_or_else(|| String::from("could not verify the current user"))?;
+    if process_uid != current_uid {
+        return Err(String::from(
+            "AppPilot can only stop processes owned by the current user",
+        ));
+    }
+
+    let output = Command::new("kill")
+        .args(["-TERM", "--", &pid.to_string()])
+        .output()
+        .map_err(|error| format!("could not send a termination signal: {error}"))?;
+    ensure_success(&format!("terminating process {pid}"), &output)?;
+    Ok(format!("Termination requested for process {pid}."))
+}
+
+fn effective_uid(status: &str) -> Option<u32> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+fn is_user_startup_path(path: &Path) -> bool {
+    dirs::home_dir().is_some_and(|home| {
+        let startup_directory = home.join(".config/autostart");
+        path.parent() == Some(startup_directory.as_path())
+    })
+}
+
+fn set_startup_entry_enabled_impl(id: String, enabled: bool) -> Result<String, String> {
+    let home =
+        dirs::home_dir().ok_or_else(|| String::from("could not determine the home directory"))?;
+    let relative = Path::new(&id);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        || relative
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("desktop")
+    {
+        return Err(String::from("invalid startup entry identifier"));
+    }
+    let path = home.join(".config/autostart").join(relative);
+    let startup_directory = home.join(".config/autostart");
+    if path.parent() != Some(startup_directory.as_path()) {
+        return Err(String::from(
+            "only startup entries directly inside the user autostart folder can be changed",
+        ));
+    }
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| format!("startup entry is no longer available: {error}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(String::from(
+            "only regular user startup entries can be changed",
+        ));
+    }
+    if !matches!(parse_startup_entry(&path), Some(Some(_))) {
+        return Err(String::from(
+            "the selected file is not a startup application",
+        ));
+    }
+
+    let content = fs::read_to_string(&path)
+        .map_err(|error| format!("could not read startup entry: {error}"))?;
+    let updated = set_startup_desktop_enabled(&content, enabled)?;
+    let temporary = path.with_extension(format!("desktop.{}.tmp", std::process::id()));
+    let mut temporary_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| format!("could not create a temporary startup entry: {error}"))?;
+    if let Err(error) = temporary_file.write_all(updated.as_bytes()) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("could not write startup entry update: {error}"));
+    }
+    if let Err(error) = fs::set_permissions(&temporary, metadata.permissions()) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "could not preserve startup entry permissions: {error}"
+        ));
+    }
+    drop(temporary_file);
+    if let Err(error) = fs::rename(&temporary, &path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("could not save startup entry update: {error}"));
+    }
+    Ok(format!(
+        "Startup entry {} was {}.",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(""),
+        if enabled { "enabled" } else { "disabled" }
+    ))
+}
+
+fn set_startup_desktop_enabled(content: &str, enabled: bool) -> Result<String, String> {
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let mut in_desktop_entry = false;
+    let mut found_group = false;
+    let mut hidden_found = false;
+    let mut gnome_enabled_found = false;
+    let mut insertion = None;
+
+    for (index, line) in lines.iter_mut().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if in_desktop_entry {
+                insertion = Some(index);
+                break;
+            }
+            in_desktop_entry = trimmed == "[Desktop Entry]";
+            found_group |= in_desktop_entry;
+            continue;
+        }
+        if !in_desktop_entry {
+            continue;
+        }
+        if let Some((key, _)) = trimmed.split_once('=') {
+            match key {
+                "Hidden" => {
+                    *line = format!("Hidden={}", !enabled);
+                    hidden_found = true;
+                }
+                "X-GNOME-Autostart-enabled" => {
+                    *line = format!("X-GNOME-Autostart-enabled={enabled}");
+                    gnome_enabled_found = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    if !found_group {
+        return Err(String::from(
+            "startup entry does not contain a Desktop Entry group",
+        ));
+    }
+    let insertion = insertion.unwrap_or(lines.len());
+    let mut settings = Vec::new();
+    if !hidden_found {
+        settings.push(format!("Hidden={}", !enabled));
+    }
+    if !gnome_enabled_found {
+        settings.push(format!("X-GNOME-Autostart-enabled={enabled}"));
+    }
+    for (offset, setting) in settings.into_iter().enumerate() {
+        lines.insert(insertion + offset, setting);
+    }
+    Ok(format!("{}\n", lines.join("\n")))
+}
+
 #[tauri::command]
-fn get_package_updates() -> Result<Vec<PackageUpdate>, String> {
+async fn get_package_updates() -> Result<Vec<PackageUpdate>, String> {
+    tauri::async_runtime::spawn_blocking(get_package_updates_impl)
+        .await
+        .map_err(|error| format!("package update scan task failed: {error}"))?
+}
+
+fn get_package_updates_impl() -> Result<Vec<PackageUpdate>, String> {
     let managers = detect_package_managers();
     let mut updates = Vec::new();
 
@@ -253,7 +471,7 @@ fn get_package_updates() -> Result<Vec<PackageUpdate>, String> {
         ensure_success("Flatpak update check", &output)?;
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let fields: Vec<&str> = line.split('\t').collect();
-            if fields.len() >= 3 && !fields[0].trim().is_empty() {
+            if fields.len() >= 3 && valid_package_id(fields[0].trim()) {
                 updates.push(PackageUpdate {
                     package_name: fields[0].trim().to_string(),
                     name: fields[1].trim().to_string(),
@@ -334,6 +552,87 @@ fn list_flatpak_catalog_impl() -> Result<Vec<FlatpakCatalogEntry>, String> {
 }
 
 #[tauri::command]
+async fn update_all_packages() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(update_all_packages_impl)
+        .await
+        .map_err(|error| format!("bulk update task failed: {error}"))?
+}
+
+fn update_all_packages_impl() -> Result<Vec<String>, String> {
+    let updates = get_package_updates_impl()?;
+    if updates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let apt_packages: Vec<&str> = updates
+        .iter()
+        .filter(|update| update.source == APT_SOURCE)
+        .map(|update| update.package_name.as_str())
+        .collect();
+    if !apt_packages.is_empty() {
+        let mut arguments = vec!["apt-get", "install", "--only-upgrade", "-y", "--"];
+        arguments.extend(apt_packages);
+        run_privileged_command("pkexec", &arguments)?;
+    }
+
+    let flatpak_updates: Vec<&PackageUpdate> = updates
+        .iter()
+        .filter(|update| update.source == FLATPAK_SOURCE)
+        .collect();
+    if !flatpak_updates.is_empty() {
+        let installed = flatpak_installations(&detect_package_managers())?;
+        for scope in ["system", "user"] {
+            let package_ids: Vec<&str> = flatpak_updates
+                .iter()
+                .filter(|update| {
+                    flatpak_scope_for(&installed, &update.package_name).as_deref() == Some(scope)
+                })
+                .map(|update| update.package_name.as_str())
+                .collect();
+            if package_ids.is_empty() {
+                continue;
+            }
+            let mut arguments = vec!["update"];
+            arguments.push(if scope == "system" {
+                "--system"
+            } else {
+                "--user"
+            });
+            arguments.push("--assumeyes");
+            arguments.extend(package_ids);
+            if scope == "system" {
+                let mut privileged_arguments = vec!["flatpak"];
+                privileged_arguments.extend(arguments);
+                run_privileged_command("pkexec", &privileged_arguments)?;
+            } else {
+                let output = Command::new("flatpak")
+                    .args(&arguments)
+                    .output()
+                    .map_err(|error| format!("could not start Flatpak updates: {error}"))?;
+                ensure_success("Flatpak bulk update", &output)?;
+            }
+        }
+    }
+
+    let snap_packages: Vec<&str> = updates
+        .iter()
+        .filter(|update| update.source == SNAP_SOURCE)
+        .map(|update| update.package_name.as_str())
+        .collect();
+    if !snap_packages.is_empty() {
+        let mut arguments = vec!["snap", "refresh"];
+        arguments.extend(snap_packages);
+        run_privileged_command("pkexec", &arguments)?;
+    }
+
+    invalidate_application_cache()?;
+    Ok(updates
+        .iter()
+        .map(|update| format!("{} ({})", update.name, update.source))
+        .collect())
+}
+
+#[tauri::command]
 async fn install_flatpak_application(
     app_id: String,
     remote: String,
@@ -401,28 +700,63 @@ fn install_flatpak_application_impl(
         ensure_success("Flatpak application installation", &output)?;
     }
 
+    invalidate_application_cache()?;
     Ok(format!("{} was installed successfully.", app.name))
 }
 
 #[tauri::command]
-fn launch_application(app_id: String) -> Result<String, String> {
-    let app = scan_applications()?
-        .into_iter()
-        .find(|entry| entry.id == app_id)
-        .ok_or_else(|| {
-            String::from("application is no longer installed; refresh the list and try again")
-        })?;
-
-    let output = Command::new("gio")
-        .args(["launch", &app.path])
-        .output()
-        .map_err(|error| format!("could not start the desktop launcher: {error}"))?;
-    ensure_success(&format!("launching {}", app.name), &output)?;
-    Ok(format!("{} started.", app.name))
+async fn set_startup_entry_enabled(id: String, enabled: bool) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || set_startup_entry_enabled_impl(id, enabled))
+        .await
+        .map_err(|error| format!("startup settings task failed: {error}"))?
 }
 
 #[tauri::command]
-fn perform_package_action(app_id: String, action: String) -> Result<String, String> {
+async fn terminate_process(pid: u32) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || terminate_process_impl(pid))
+        .await
+        .map_err(|error| format!("process action task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn launch_application(app_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || launch_application_impl(app_id))
+        .await
+        .map_err(|error| format!("application launch task failed: {error}"))?
+}
+
+fn launch_application_impl(app_id: String) -> Result<String, String> {
+    let path = PathBuf::from(&app_id);
+    if !path.is_absolute()
+        || !path.is_file()
+        || !desktop_search_directories()
+            .iter()
+            .any(|directory| path.starts_with(directory))
+    {
+        return Err(String::from(
+            "application launcher is no longer available; refresh the list and try again",
+        ));
+    }
+    let parsed = parse_desktop_file(&path).ok_or_else(|| {
+        String::from("application launcher is no longer a visible desktop application")
+    })?;
+    let output = Command::new("gio")
+        .arg("launch")
+        .arg(&path)
+        .output()
+        .map_err(|error| format!("could not start the desktop launcher: {error}"))?;
+    ensure_success(&format!("launching {}", parsed.name), &output)?;
+    Ok(format!("{} started.", parsed.name))
+}
+
+#[tauri::command]
+async fn perform_package_action(app_id: String, action: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || perform_package_action_impl(app_id, action))
+        .await
+        .map_err(|error| format!("package action task failed: {error}"))?
+}
+
+fn perform_package_action_impl(app_id: String, action: String) -> Result<String, String> {
     let action = match action.as_str() {
         "remove" => PackageAction::Remove,
         _ => {
@@ -431,7 +765,7 @@ fn perform_package_action(app_id: String, action: String) -> Result<String, Stri
             ))
         }
     };
-    let app = scan_applications()?
+    let app = scan_applications_uncached()?
         .into_iter()
         .find(|entry| entry.id == app_id)
         .ok_or_else(|| {
@@ -459,15 +793,22 @@ fn perform_package_action(app_id: String, action: String) -> Result<String, Stri
         }
     }
 
+    invalidate_application_cache()?;
     Ok(format!("{} was removed successfully.", app.name))
 }
 
 #[tauri::command]
-fn update_package(package_name: String, source: String) -> Result<String, String> {
+async fn update_package(package_name: String, source: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || update_package_impl(package_name, source))
+        .await
+        .map_err(|error| format!("package update task failed: {error}"))?
+}
+
+fn update_package_impl(package_name: String, source: String) -> Result<String, String> {
     if !valid_package_id(&package_name) {
         return Err(String::from("invalid package identifier"));
     }
-    let update = get_package_updates()?
+    let update = get_package_updates_impl()?
         .into_iter()
         .find(|update| update.package_name == package_name && update.source == source)
         .ok_or_else(|| {
@@ -488,6 +829,7 @@ fn update_package(package_name: String, source: String) -> Result<String, String
         SNAP_SOURCE => run_snap_action(&package_name, PackageAction::Update)?,
         _ => return Err(format!("updates from {source} are not supported")),
     }
+    invalidate_application_cache()?;
     Ok(format!(
         "{} was updated to {}.",
         update.name, update.version
@@ -606,10 +948,37 @@ fn ensure_success(context: &str, output: &Output) -> Result<(), String> {
 }
 
 fn scan_applications() -> Result<Vec<AppRecord>, String> {
+    let cache = APPLICATION_CACHE.get_or_init(|| Mutex::new(None));
+    let mut cached = cache
+        .lock()
+        .map_err(|error| format!("application inventory cache is unavailable: {error}"))?;
+    if let Some((created, applications)) = cached.as_ref() {
+        if created.elapsed() < APPLICATION_CACHE_TTL {
+            return Ok(applications.clone());
+        }
+    }
+
+    let applications = scan_applications_uncached()?;
+    *cached = Some((Instant::now(), applications.clone()));
+    Ok(applications)
+}
+
+fn invalidate_application_cache() -> Result<(), String> {
+    if let Some(cache) = APPLICATION_CACHE.get() {
+        *cache
+            .lock()
+            .map_err(|error| format!("application inventory cache is unavailable: {error}"))? =
+            None;
+    }
+    Ok(())
+}
+
+fn scan_applications_uncached() -> Result<Vec<AppRecord>, String> {
     let managers = detect_package_managers();
     let flatpak_apps = flatpak_installations(&managers)?;
     let snap_apps = snap_packages(&managers)?;
     let mut registry = HashMap::new();
+    let mut candidates = Vec::new();
 
     for directory in desktop_search_directories() {
         if !directory.exists() {
@@ -622,62 +991,69 @@ fn scan_applications() -> Result<Vec<AppRecord>, String> {
             let Some(desktop_id) = desktop_id_for_path(&directory, &path) else {
                 continue;
             };
-            if registry.contains_key(&desktop_id) {
-                continue;
-            }
-            let dpkg_owner = if is_system_desktop_path(&path) {
-                dpkg_package_for_path(&path)
-            } else {
-                None
-            };
-            let flatpak_id = parsed
-                .package_name
-                .clone()
-                .filter(|name| flatpak_apps.iter().any(|(app_id, _)| app_id == name))
-                .or_else(|| {
-                    flatpak_apps
-                        .iter()
-                        .any(|(app_id, _)| app_id == &desktop_id)
-                        .then(|| desktop_id.clone())
-                });
-            let snap_id = parsed
-                .package_name
-                .clone()
-                .filter(|name| snap_apps.contains(name))
-                .or_else(|| snap_apps.contains(&desktop_id).then(|| desktop_id.clone()));
-
-            let (source, package_name, package_scope) = if let Some(package) = dpkg_owner {
-                (APT_SOURCE, Some(package), None)
-            } else if let Some(package) = flatpak_id {
-                (
-                    FLATPAK_SOURCE,
-                    Some(package.clone()),
-                    flatpak_scope_for(&flatpak_apps, &package),
-                )
-            } else if let Some(package) = snap_id {
-                (SNAP_SOURCE, Some(package), None)
-            } else if is_user_desktop_path(&path) {
-                (LOCAL_SOURCE, None, None)
-            } else {
-                (SYSTEM_SOURCE, None, None)
-            };
-
-            registry.insert(
-                desktop_id,
-                AppRecord {
-                    id: path.display().to_string(),
-                    name: parsed.name,
-                    description: parsed.description,
-                    source: source.to_string(),
-                    icon: parsed.icon,
-                    installed: true,
-                    package_name,
-                    category: parsed.categories,
-                    path: path.display().to_string(),
-                    package_scope,
-                },
-            );
+            candidates.push((desktop_id, path, parsed));
         }
+    }
+
+    let system_paths: Vec<PathBuf> = candidates
+        .iter()
+        .filter(|(_, path, _)| is_system_desktop_path(path))
+        .map(|(_, path, _)| path.clone())
+        .collect();
+    let dpkg_owners = dpkg_packages_for_paths(&system_paths);
+
+    for (desktop_id, path, parsed) in candidates {
+        if registry.contains_key(&desktop_id) {
+            continue;
+        }
+        let dpkg_owner = dpkg_owners.get(&path).cloned();
+        let flatpak_id = parsed
+            .package_name
+            .clone()
+            .filter(|name| flatpak_apps.iter().any(|(app_id, _)| app_id == name))
+            .or_else(|| {
+                flatpak_apps
+                    .iter()
+                    .any(|(app_id, _)| app_id == &desktop_id)
+                    .then(|| desktop_id.clone())
+            });
+        let snap_id = parsed
+            .package_name
+            .clone()
+            .filter(|name| snap_apps.contains(name))
+            .or_else(|| snap_apps.contains(&desktop_id).then(|| desktop_id.clone()));
+
+        let (source, package_name, package_scope) = if let Some(package) = dpkg_owner {
+            (APT_SOURCE, Some(package), None)
+        } else if let Some(package) = flatpak_id {
+            (
+                FLATPAK_SOURCE,
+                Some(package.clone()),
+                flatpak_scope_for(&flatpak_apps, &package),
+            )
+        } else if let Some(package) = snap_id {
+            (SNAP_SOURCE, Some(package), None)
+        } else if is_user_desktop_path(&path) {
+            (LOCAL_SOURCE, None, None)
+        } else {
+            (SYSTEM_SOURCE, None, None)
+        };
+
+        registry.insert(
+            desktop_id,
+            AppRecord {
+                id: path.display().to_string(),
+                name: parsed.name,
+                description: parsed.description,
+                source: source.to_string(),
+                icon: parsed.icon,
+                installed: true,
+                package_name,
+                category: parsed.categories,
+                path: path.display().to_string(),
+                package_scope,
+            },
+        );
     }
 
     let mut apps: Vec<AppRecord> = registry.into_values().collect();
@@ -753,7 +1129,7 @@ fn parse_desktop_file(path: &Path) -> Option<ParsedDesktopEntry> {
     })
 }
 
-fn parse_startup_entry(path: &Path) -> Option<Option<(String, PathBuf)>> {
+fn parse_startup_entry(path: &Path) -> Option<Option<(String, PathBuf, bool)>> {
     let content = fs::read_to_string(path).ok()?;
     let mut in_desktop_entry = false;
     let mut is_application = false;
@@ -783,13 +1159,14 @@ fn parse_startup_entry(path: &Path) -> Option<Option<(String, PathBuf)>> {
         }
     }
 
-    if hidden || !enabled {
-        return Some(None);
-    }
     if !is_application {
         return None;
     }
-    Some(Some((name?.trim().to_string(), path.to_path_buf())))
+    Some(Some((
+        name?.trim().to_string(),
+        path.to_path_buf(),
+        !hidden && enabled,
+    )))
 }
 
 fn desktop_files_in(directory: &Path) -> Result<Vec<PathBuf>, String> {
@@ -863,20 +1240,32 @@ fn is_user_desktop_path(path: &Path) -> bool {
     dirs::home_dir().is_some_and(|home| path.starts_with(home))
 }
 
-fn dpkg_package_for_path(path: &Path) -> Option<String> {
-    let output = Command::new("dpkg-query")
-        .args(["--search", &path.display().to_string()])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+fn dpkg_packages_for_paths(paths: &[PathBuf]) -> HashMap<PathBuf, String> {
+    let mut owners = HashMap::new();
+    for chunk in paths.chunks(128) {
+        let Ok(output) = Command::new("dpkg-query")
+            .arg("--search")
+            .args(chunk)
+            .output()
+        else {
+            break;
+        };
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Some((path, package)) = parse_dpkg_owner_line(line) {
+                owners.insert(path, package);
+            }
+        }
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.lines().find_map(|line| {
-        let (package, _) = line.split_once(": ")?;
-        let package = package.split(',').next()?.trim();
-        valid_package_id(package).then(|| package.to_string())
-    })
+    owners
+}
+
+fn parse_dpkg_owner_line(line: &str) -> Option<(PathBuf, String)> {
+    let (package_field, path_field) = line.split_once(": ")?;
+    let package = package_field
+        .split(',')
+        .map(str::trim)
+        .find(|package| valid_package_id(package))?;
+    Some((PathBuf::from(path_field.trim()), package.to_string()))
 }
 
 fn flatpak_installations(
@@ -1019,8 +1408,11 @@ pub fn run() {
             scan_startup_entries,
             scan_running_processes,
             get_package_updates,
+            update_all_packages,
             list_flatpak_catalog,
             install_flatpak_application,
+            set_startup_entry_enabled,
+            terminate_process,
             launch_application,
             perform_package_action,
             update_package
@@ -1082,6 +1474,55 @@ mod tests {
         assert_eq!(entries[1].description, "");
         assert!(!entries[1].installed);
         assert!(parse_flatpak_catalog(output, "invalid", &installed).is_empty());
+    }
+
+    #[test]
+    fn parses_batched_dpkg_ownership_lines() {
+        assert_eq!(
+            parse_dpkg_owner_line(
+                "desktop-package, second-package: /usr/share/applications/editor.desktop"
+            ),
+            Some((
+                PathBuf::from("/usr/share/applications/editor.desktop"),
+                String::from("desktop-package")
+            ))
+        );
+        assert_eq!(
+            parse_dpkg_owner_line("unknown: no path"),
+            Some((PathBuf::from("no path"), String::from("unknown")))
+        );
+        assert!(parse_dpkg_owner_line("line without a separator").is_none());
+        assert!(parse_dpkg_owner_line("bad package!: /tmp/app.desktop").is_none());
+    }
+
+    #[test]
+    fn toggles_startup_desktop_flags_without_changing_other_groups() {
+        let content = concat!(
+            "[Desktop Entry]\n",
+            "Type=Application\n",
+            "Name=Sample\n",
+            "Hidden=true\n",
+            "X-GNOME-Autostart-enabled=false\n",
+            "\n[Desktop Action Open]\n",
+            "Name=Open\n",
+        );
+        let enabled = set_startup_desktop_enabled(content, true).unwrap();
+        assert!(enabled.contains("Hidden=false\n"));
+        assert!(enabled.contains("X-GNOME-Autostart-enabled=true\n"));
+        assert!(enabled.contains("[Desktop Action Open]\nName=Open\n"));
+
+        let disabled =
+            set_startup_desktop_enabled("[Desktop Entry]\nType=Application\n", false).unwrap();
+        assert!(disabled.contains("Hidden=true\n"));
+        assert!(disabled.contains("X-GNOME-Autostart-enabled=false\n"));
+        assert!(set_startup_desktop_enabled("[Desktop Action Open]\nName=Open\n", false).is_err());
+    }
+
+    #[test]
+    fn reads_effective_user_ids_from_proc_status() {
+        let status = "Name:\tapp\nUid:\t1000\t1001\t1002\t1003\n";
+        assert_eq!(effective_uid(status), Some(1001));
+        assert_eq!(effective_uid("Name:\tapp\n"), None);
     }
 
     #[test]
@@ -1165,7 +1606,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parse_startup_entry(&enabled).unwrap().unwrap().0, "Enabled");
-        assert!(parse_startup_entry(&disabled).unwrap().is_none());
+        assert!(parse_startup_entry(&enabled).unwrap().unwrap().2);
+        assert!(!parse_startup_entry(&disabled).unwrap().unwrap().2);
         fs::remove_dir_all(directory).unwrap();
     }
 
