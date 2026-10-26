@@ -2063,7 +2063,10 @@ fn parse_zypper_search(
         .lines()
         .filter_map(|line| {
             let fields: Vec<&str> = line.split('|').map(str::trim).collect();
-            if fields.len() < 4 || fields[0].is_empty() || fields[0] == "S" {
+            if fields.len() < 4
+                || fields[1].eq_ignore_ascii_case("repository")
+                || !valid_package_id(fields[2])
+            {
                 return None;
             }
             make_catalog_entry(
