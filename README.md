@@ -1,106 +1,86 @@
 # AppPilot
 
-AppPilot is a Linux desktop application manager built with Tauri, React, TypeScript, and Rust. It helps users discover installed software, inspect desktop launchers, review package-manager status, and safely launch or manage applications from local sources without exposing unrestricted shell access to the UI.
+AppPilot is a native desktop application manager for Linux and Windows, built with Tauri 2, React, TypeScript, and Rust. It reads the real application and package-manager state of the computer it is running on; it does not ship a fabricated catalogue or simulate successful system changes.
 
-## Purpose
+## What it does
 
-AppPilot is designed for Ubuntu-based and Zorin OS-style Linux desktops. It focuses on
+- **20+ practical capabilities:** system overview; installed-app library; instant search; source/category filters; favourites and collections; alphabetical sorting; application details; desktop launching; multi-provider discovery; package installation; selected and grouped updates; confirmed bulk removal; provider-aware reinstall; local action history; update deferrals; manifests and restore queues; cache insights; diagnostics export; and startup/process controls.
+- **Linux:** discovers desktop launchers and package ownership from XDG, APT, DNF, Pacman, Zypper, Flatpak, and Snap where installed; searches available providers together; and performs package actions only when local package identity can be verified.
+- **Windows:** discovers WinGet-managed apps, searches the live WinGet catalogue, installs exact package IDs for the current user, checks and applies individual or grouped updates, uninstalls exact package IDs, and opens matching Start menu shortcuts.
+- Reads and manages user-owned startup entries (Linux XDG entries and Windows Startup-folder shortcuts).
+- Shows processes visible to the current user and only offers stop actions after checking process ownership.
+- Saves favourites, filters by source and category, sorts the library, and offers a one-click way to clear filters.
+- Exports/imports portable package manifests and preferences; restore queues show exact sources and install scopes and require confirmation before any package action.
+- Estimates selected Linux package-cache directories and cleans them only through the package manager's own command. WinGet cache cleanup is explicitly unsupported.
+- Exports a small diagnostics summary containing OS/provider information only; it omits personal paths, logs, and package history.
+- Offers opt-in update reminders while AppPilot is open. Reminders never install packages and are not scheduled by the operating system.
+- Update deferrals hide items only inside AppPilot. Persistent holds, pins, or locks remain under the package manager's native controls and are never changed by a deferral.
+- Provides a first-run guide, keyboard search (`Ctrl+K` or `/`), a system-aware theme default, and a persistent compact library layout.
+- Keeps application data and preferences on the device. AppPilot has no telemetry.
 
-- fast local discovery of desktop applications,
-- clear source attribution for APT, Flatpak, Snap, and local launcher entries,
-- package-manager integration with explicit privilege checks,
-- safe launch and package operations,
-- a polished desktop experience with a compact app catalog and details panel.
+### Windows requirements
 
-## Current status
+AppPilot uses WinGet, which is provided by **App Installer**. Install or update App Installer from Microsoft Store to use the Windows application inventory, catalogue, and package actions. Only package identities reported by WinGet are manageable; other Windows software is not guessed or removed.
 
-This repository contains the first working implementation of the AppPilot shell and desktop discovery layer. The front-end is implemented in React + TypeScript and is validated with a production build. The Rust backend handles desktop-entry discovery, startup application inspection, process metadata, and validated package actions. Full native Tauri packaging is currently limited by missing GTK system libraries in this build environment.
+WinGet installs are restricted to the current user. Package names and IDs are passed as individual process arguments, not evaluated as shell commands. App launching looks for an exact-name Start menu shortcut and reports when one cannot be found.
 
-## Supported platforms
+### Linux requirements
 
-- Primary target: Ubuntu-based Linux desktop environments
-- Secondary candidate: Zorin OS 18-style distributions
-- Architecture: x86_64 Linux
+The Linux build targets x86_64 and uses GTK 3, WebKitGTK 4.1, XDG desktop entries, `/proc`, the detected package managers, and `pkexec` where available. Package actions are offered only when AppPilot can verify the local package identity. Provider capabilities differ: reinstall is available only for APT, DNF, Pacman, and Zypper; rollback is not offered unless a provider exposes a verifiable target version.
 
-## Features
+## Performance and accessibility
 
-- Sidebar-based desktop navigation
-- Search and source filtering for app catalog entries
-- Desktop entry parsing for user/system application directories
-- Startup application detection and basic process inspection
-- Package-manager status detection for APT, Flatpak, and Snap
-- Assistant-style package action validation with `pkexec` checks
-- Dark/light theme toggle
-- Real local data only; no fake statistics or fabricated app catalog
+Process and startup inventories are loaded only when their pages are opened. APT package ownership is queried in batches and the Linux application inventory is cached briefly in memory. Long-running operating-system commands execute outside the UI thread; AppPilot does not poll the system in the background.
 
-## Architecture
+The interface avoids remote fonts and background effects, follows the operating system's reduced-motion preference, uses readable contrast and spacing, and lets users choose a compact library layout. Search and filters are local except for an explicit WinGet catalogue search or a Flatpak catalogue request.
 
-- Frontend: React + TypeScript + Vite
-- Desktop shell: Tauri 2
-- Native logic: Rust
-- Data sources: desktop-entry files, process metadata, and command availability checks
+## GitHub Releases
 
-## Development setup
+The release workflow builds the supported desktop installers on GitHub Actions. No local package build is required.
 
-Requirements:
+1. Push a version tag, for example `v0.2.0`.
+2. Open the generated **GitHub Release** for that tag.
+3. Download `AppPilot_*_amd64.AppImage` for Linux or the `.exe` (NSIS) / `.msi` installer for Windows.
 
-- Node.js 20+
-- npm 9+
-- Rust stable toolchain
-- Tauri runtime dependencies for Linux
+The workflow also runs manually from **Actions → Desktop release → Run workflow**. Manually triggered builds are downloadable from the completed workflow's **Artifacts** section for 14 days; tag builds additionally attach all installers to the GitHub Release.
 
-Install and run:
+Pull requests and pushes run frontend lint/build plus Rust formatting, tests, and Clippy on Linux and Windows.
 
-```bash
-npm install
-npx -p node@20 -- npm run dev
-```
+## Development
 
-For production validation:
+Requirements: Node.js 22.12+, npm 10+, and Rust 1.90+.
 
 ```bash
-npx -p node@20 -- npm run build
+npm ci
+npm run tauri:dev
 ```
 
-## Build notes and limitations
+`npm run dev` starts only the browser interface. A browser has no native package-manager access, so AppPilot displays a clear runtime notice instead of sample data or simulated actions.
 
-The project’s frontend build succeeds in this environment. The native Tauri build is blocked by missing GTK system libraries, specifically `gdk-3.0.pc` and related development packages. The exact error observed is:
-
-```text
-Package gdk-3.0 was not found in the pkg-config search path.
-```
-
-On Debian/Ubuntu systems, this is typically resolved with the Linux Tauri dependencies installed via the package manager, for example:
+Linux development dependencies on Ubuntu:
 
 ```bash
-sudo apt-get install build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev \
-  libayatana-appindicator3-dev librsvg2-dev
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libgtk-3-dev \
+  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 ```
 
-If those packages are not available on the system, the native bundle cannot compile until the required libraries are installed.
+Windows development requires the Microsoft C++ Build Tools, WebView2 Runtime, and WinGet/App Installer.
 
-## Security model
+## Security and privacy
 
-- No credentials are embedded in source code.
-- Package operations only run through validated command arguments.
-- Privileged actions require `pkexec` when supported.
-- Frontend components do not expose unrestricted shell capability.
-- There is no hidden telemetry or automatic remote network call in the app logic.
+- Installed-application inventory, process details, and preferences stay local.
+- Linux package operations re-read launcher and package metadata before acting. System-level operations use the operating system's authorization prompt.
+- Windows package IDs are validated and passed as explicit WinGet arguments. Process termination is limited to processes owned by the current user.
+- Install and removal require confirmation; user startup entries are distinguished from system-owned entries.
+- Browser-only mode never substitutes demo data.
 
-## Running the app
-
-The project is structured for Tauri desktop execution after native dependencies are present:
-
-```bash
-npx -p node@20 -- npm install
-cargo test --manifest-path src-tauri/Cargo.toml
-npx -p node@20 -- npm run build
-```
+See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 ## Contributing
 
-Contributions are welcome. Please open an issue or pull request with a concise explanation of the change and validation steps. Keep changes focused, testable, and consistent with the Linux desktop security model.
+Contributions are welcome. Include the operating system, package-manager state, and exact validation commands in pull requests. Keep platform-support claims aligned with working native backends.
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE).
+AppPilot is licensed under the MIT License. See [LICENSE](LICENSE).
