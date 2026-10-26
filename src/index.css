@@ -1,0 +1,76 @@
+:root {
+  color-scheme: dark;
+  --bg: #020817;
+  --bg-panel: rgba(15, 23, 42, 0.9);
+  --bg-panel-alt: rgba(15, 23, 42, 0.82);
+  --bg-soft: rgba(15, 118, 110, 0.12);
+  --border: rgba(148, 163, 184, 0.2);
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --brand: #7dd3fc;
+  --brand-strong: #38bdf8;
+  --danger: #fca5a5;
+  font-family: Inter, 'Segoe UI', sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #f8fafc;
+  --bg-panel: rgba(255, 255, 255, 0.9);
+  --bg-panel-alt: rgba(248, 250, 252, 0.9);
+  --bg-soft: rgba(125, 211, 252, 0.1);
+  --border: rgba(15, 23, 42, 0.08);
+  --text: #0f172a;
+  --muted: #475569;
+  --brand: #0284c7;
+  --brand-strong: #0ea5e9;
+  --danger: #dc2626;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  min-width: 0;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  transition: transform 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+}
+
+input,
+select {
+  outline: none;
+}
+
+img {
+  max-width: 100%;
+  display: block;
+}
