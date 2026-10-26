@@ -1,106 +1,77 @@
 # AppPilot
 
-AppPilot is a Linux desktop application manager built with Tauri, React, TypeScript, and Rust. It helps users discover installed software, inspect desktop launchers, review package-manager status, and safely launch or manage applications from local sources without exposing unrestricted shell access to the UI.
+AppPilot is a native Linux desktop application manager built with Tauri 2, React, TypeScript, and Rust. It discovers application launchers and system state from the machine it is running on; it does not ship a fabricated app catalogue or simulated package-manager results.
 
-## Purpose
+## What it does
 
-AppPilot is designed for Ubuntu-based and Zorin OS-style Linux desktops. It focuses on
+- Discovers visible application desktop entries in the current XDG, Flatpak, and Snap application directories.
+- Identifies APT ownership from `dpkg-query` and recognizes installed Flatpak and Snap applications from their own local inventories.
+- Launches installed applications through the desktop-entry system (`gio launch`).
+- Browses applications available from the Flatpak remotes already configured on the computer and installs them with an explicit confirmation.
+- Reads enabled XDG startup entries and live process names / resident memory from `/proc`.
+- Checks for available APT, Flatpak, and Snap updates using the installed package-manager tools.
+- Supports update and removal for packages it can verify; removal requires confirmation and privileged work goes through the system authorization prompt.
+- Offers dark and light themes, with the selection saved locally in the app.
 
-- fast local discovery of desktop applications,
-- clear source attribution for APT, Flatpak, Snap, and local launcher entries,
-- package-manager integration with explicit privilege checks,
-- safe launch and package operations,
-- a polished desktop experience with a compact app catalog and details panel.
+Package metadata is deliberately conservative. Launchers whose package owner cannot be proven are labelled `System` or `Local`, and package actions remain unavailable for them.
 
-## Current status
+## Platform support
 
-This repository contains the first working implementation of the AppPilot shell and desktop discovery layer. The front-end is implemented in React + TypeScript and is validated with a production build. The Rust backend handles desktop-entry discovery, startup application inspection, process metadata, and validated package actions. Full native Tauri packaging is currently limited by missing GTK system libraries in this build environment.
+The first supported target is **x86_64 Linux** (Ubuntu 24.04-based distributions). AppPilot uses Linux desktop-entry conventions, XDG autostart, `/proc`, APT, Flatpak, Snap, and `pkexec`.
 
-## Supported platforms
+Windows and macOS installers are not currently produced: their native application-discovery and package-management backends have not been implemented. The release workflow only publishes the supported Linux AppImage.
 
-- Primary target: Ubuntu-based Linux desktop environments
-- Secondary candidate: Zorin OS 18-style distributions
-- Architecture: x86_64 Linux
+## Requirements
 
-## Features
+- Linux desktop session with GTK 3 and WebKitGTK 4.1 development libraries
+- Node.js 22.12+ and npm 10+
+- Rust 1.90+ (stable recommended)
+- `gio` for launching desktop entries
 
-- Sidebar-based desktop navigation
-- Search and source filtering for app catalog entries
-- Desktop entry parsing for user/system application directories
-- Startup application detection and basic process inspection
-- Package-manager status detection for APT, Flatpak, and Snap
-- Assistant-style package action validation with `pkexec` checks
-- Dark/light theme toggle
-- Real local data only; no fake statistics or fabricated app catalog
-
-## Architecture
-
-- Frontend: React + TypeScript + Vite
-- Desktop shell: Tauri 2
-- Native logic: Rust
-- Data sources: desktop-entry files, process metadata, and command availability checks
-
-## Development setup
-
-Requirements:
-
-- Node.js 20+
-- npm 9+
-- Rust stable toolchain
-- Tauri runtime dependencies for Linux
-
-Install and run:
+On Ubuntu, install the native build dependencies with:
 
 ```bash
-npm install
-npx -p node@20 -- npm run dev
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libgtk-3-dev \
+  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 ```
 
-For production validation:
+## Run locally
+
+From the repository root:
 
 ```bash
-npx -p node@20 -- npm run build
+npm ci
+npm run tauri:dev
 ```
 
-## Build notes and limitations
+`npm run dev` starts only the browser interface. Since a browser has no access to the native Linux backend, AppPilot shows a clear desktop-runtime notice instead of displaying sample applications or pretending that system operations succeeded.
 
-The project’s frontend build succeeds in this environment. The native Tauri build is blocked by missing GTK system libraries, specifically `gdk-3.0.pc` and related development packages. The exact error observed is:
+## GitHub builds
 
-```text
-Package gdk-3.0 was not found in the pkg-config search path.
-```
+The GitHub Actions workflows are the source of release builds; a local AppImage build is not required.
 
-On Debian/Ubuntu systems, this is typically resolved with the Linux Tauri dependencies installed via the package manager, for example:
+- Pushes and pull requests run frontend and Rust quality checks.
+- To build an AppImage on GitHub, open **Actions → Linux release → Run workflow**. Download the `AppPilot-linux-x86_64` artifact from the completed run; workflow artifacts are retained for 14 days.
+- Pushing a version tag such as `v0.1.0` builds the AppImage and attaches it to a GitHub Release.
 
-```bash
-sudo apt-get install build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev \
-  libayatana-appindicator3-dev librsvg2-dev
-```
+CI runs frontend lint/build, Rust formatting, backend tests, and Clippy on Linux.
 
-If those packages are not available on the system, the native bundle cannot compile until the required libraries are installed.
+## Security and privacy
 
-## Security model
+- Installed-application inventory and process details stay local. The Discover page contacts only the Flatpak remotes configured on the computer when the user opens, refreshes, or installs an application; AppPilot has no telemetry or third-party application catalogue.
+- Frontend package operations identify an installed application by its desktop-entry ID. The Rust backend re-reads the launcher and package metadata before running an action.
+- Commands are launched with explicit argument arrays; no user-provided string is executed through a shell.
+- Install and removal require explicit user confirmation. Flatpak installs are re-checked against the selected configured remote; user installs stay in the current account and system-wide installs use `pkexec`.
+- AppPilot only offers package operations when the package manager and package identity can be verified.
+- Application names and system details are displayed from local OS data. Browser-only mode never substitutes demo data.
 
-- No credentials are embedded in source code.
-- Package operations only run through validated command arguments.
-- Privileged actions require `pkexec` when supported.
-- Frontend components do not expose unrestricted shell capability.
-- There is no hidden telemetry or automatic remote network call in the app logic.
-
-## Running the app
-
-The project is structured for Tauri desktop execution after native dependencies are present:
-
-```bash
-npx -p node@20 -- npm install
-cargo test --manifest-path src-tauri/Cargo.toml
-npx -p node@20 -- npm run build
-```
+See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 ## Contributing
 
-Contributions are welcome. Please open an issue or pull request with a concise explanation of the change and validation steps. Keep changes focused, testable, and consistent with the Linux desktop security model.
+Contributions are welcome. Please include the Linux distribution, relevant package-manager state, and the exact validation commands used in your pull request. Keep platform-support claims aligned with working native backends.
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE).
+AppPilot is licensed under the MIT License. See [LICENSE](LICENSE).

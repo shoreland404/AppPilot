@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.shoreland404.apppilot",
   "build": {
-    "frontendDist": "dist",
+    "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
@@ -13,19 +13,21 @@
     "windows": [
       {
         "title": "AppPilot",
-        "width": 800,
-        "height": 600,
+        "width": 1360,
+        "height": 900,
+        "minWidth": 940,
+        "minHeight": 680,
         "resizable": true,
         "fullscreen": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost ws://localhost:5173; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["appimage"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
