@@ -684,6 +684,7 @@ function App() {
               favoritesOnly={favoritesOnly}
               favoriteAppIds={favoriteAppIds}
               wingetAvailable={overview?.package_status.winget ?? false}
+              platform={platform}
               onFilter={setSourceFilter}
               onCategoryFilter={setCategoryFilter}
               onToggleFavorites={() => setFavoritesOnly((current) => !current)}
