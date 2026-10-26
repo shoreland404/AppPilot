@@ -271,16 +271,24 @@ function App() {
 
   useEffect(() => {
     localStorage.setItem('apppilot-reminder-days', String(reminderDays))
-    if (reminderDays < 1) return
-    const dueAt = Number(localStorage.getItem('apppilot-next-reminder') ?? 0)
-    const delay = Math.max(0, dueAt - Date.now())
-    const timer = window.setTimeout(() => {
-      setNotice('Your optional update reminder is due. Open Updates to review available changes; AppPilot will not install anything automatically.')
-      localStorage.setItem('apppilot-next-reminder', String(Date.now() + reminderDays * 24 * 60 * 60 * 1000))
-    }, delay || reminderDays * 24 * 60 * 60 * 1000)
-    if (!dueAt) {
-      localStorage.setItem('apppilot-next-reminder', String(Date.now() + reminderDays * 24 * 60 * 60 * 1000))
+    if (reminderDays < 1) {
+      localStorage.removeItem('apppilot-next-reminder')
+      return
     }
+    const interval = reminderDays * 24 * 60 * 60 * 1000
+    const dueAt = Number(localStorage.getItem('apppilot-next-reminder') ?? 0)
+    const nextDueAt = dueAt > Date.now() ? dueAt : Date.now() + interval
+    localStorage.setItem('apppilot-next-reminder', String(nextDueAt))
+    let timer: number
+    const scheduleReminder = (scheduledAt: number) => {
+      timer = window.setTimeout(() => {
+        const nextReminder = Date.now() + interval
+        localStorage.setItem('apppilot-next-reminder', String(nextReminder))
+        setNotice('Your optional update reminder is due. Open Updates to review available changes; AppPilot will not install anything automatically.')
+        scheduleReminder(nextReminder)
+      }, Math.max(0, scheduledAt - Date.now()))
+    }
+    scheduleReminder(nextDueAt)
     return () => window.clearTimeout(timer)
   }, [reminderDays])
 
