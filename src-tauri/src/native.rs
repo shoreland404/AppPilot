@@ -101,7 +101,8 @@ const SNAP_SOURCE: &str = "Snap";
 const LOCAL_SOURCE: &str = "Local";
 const SYSTEM_SOURCE: &str = "System";
 const APPLICATION_CACHE_TTL: Duration = Duration::from_secs(60);
-static APPLICATION_CACHE: OnceLock<Mutex<Option<(Instant, Vec<AppRecord>)>>> = OnceLock::new();
+type ApplicationCache = Mutex<Option<(Instant, Vec<AppRecord>)>>;
+static APPLICATION_CACHE: OnceLock<ApplicationCache> = OnceLock::new();
 
 #[tauri::command]
 async fn get_dashboard_data() -> Result<DashboardData, String> {
