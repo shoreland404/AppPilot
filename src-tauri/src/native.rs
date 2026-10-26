@@ -515,7 +515,8 @@ fn get_system_diagnostics_impl() -> Result<SystemDiagnostics, String> {
         (SNAP_SOURCE, managers.snap),
     ]
     .into_iter()
-    .filter_map(|(name, available)| available.then(|| name.to_string()))
+    .filter(|(_, available)| *available)
+    .map(|(name, _)| name.to_string())
     .collect::<Vec<_>>();
     let mut notices = Vec::new();
     if package_sources.is_empty() {
