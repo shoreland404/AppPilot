@@ -1755,6 +1755,226 @@
   to { background-position: -200% 0; }
 }
 
+/* Keep the interface calm and readable across lower-powered desktop systems. */
+:root {
+  --accent: #7996e8;
+  --accent-strong: #607fd4;
+  --accent-wash: rgba(113, 149, 255, 0.09);
+  --shadow: 0 12px 38px rgba(0, 0, 0, 0.12);
+}
+
+:root[data-theme='light'] {
+  --accent: #506fc7;
+  --accent-strong: #405fae;
+  --accent-wash: rgba(73, 111, 224, 0.07);
+  --shadow: 0 12px 38px rgba(34, 52, 82, 0.06);
+}
+
+.topbar {
+  backdrop-filter: none;
+  background: var(--bg);
+}
+
+.brand-mark,
+.metric-icon,
+.app-glyph,
+.banner-art,
+.metric-decoration {
+  box-shadow: none;
+}
+
+.nav-button,
+.primary-button,
+.secondary-button,
+.icon-button,
+.application-row,
+.recent-app-card {
+  transition-duration: 100ms;
+}
+
+.nav-button {
+  font-size: 13px;
+}
+
+.status-dot.unavailable {
+  background: var(--subtle);
+  box-shadow: none;
+}
+
+.global-search input,
+.filter-search input,
+.catalog-search input {
+  font-size: 13px;
+}
+
+.page-heading h1 {
+  font-size: 27px;
+}
+
+.heading-description,
+.section-title-row p {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.eyebrow,
+.sidebar-caption {
+  font-size: 10px;
+}
+
+.breadcrumbs {
+  font-size: 12px;
+}
+
+.section-title-row h2,
+.list-heading h2 {
+  font-size: 16px;
+}
+
+.welcome-banner,
+:root[data-theme='light'] .welcome-banner {
+  border-color: var(--border);
+  background: var(--panel);
+  box-shadow: none;
+}
+
+.banner-art {
+  display: none;
+}
+
+.welcome-copy {
+  max-width: 650px;
+}
+
+.welcome-copy p,
+:root[data-theme='light'] .welcome-copy p {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.banner-kicker,
+:root[data-theme='light'] .banner-kicker {
+  color: var(--accent);
+  font-size: 10px;
+}
+
+.banner-button {
+  min-height: 36px;
+  font-size: 12px;
+}
+
+.metric-copy > span {
+  font-size: 12px;
+}
+
+.metric-copy strong {
+  font-size: 26px;
+}
+
+.metric-copy small,
+.application-row-copy small,
+.data-row-main small,
+.catalog-entry-copy > small {
+  font-size: 11px;
+}
+
+.application-row-copy strong,
+.data-row-main strong,
+.catalog-entry-copy > strong {
+  font-size: 13px;
+}
+
+.text-button,
+.primary-button,
+.secondary-button,
+.toggle-control {
+  font-size: 12px;
+}
+
+.detail-metadata dt,
+.detail-metadata dd {
+  font-size: 11px;
+}
+
+.page-footer {
+  font-size: 10px;
+}
+
+.getting-started {
+  padding: 20px;
+  margin-bottom: 22px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.getting-started-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.getting-started-heading h2 {
+  margin: 5px 0 0;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.25px;
+}
+
+.getting-started-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 17px;
+}
+
+.getting-started-steps button {
+  display: grid;
+  gap: 6px;
+  min-height: 94px;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel-raised);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.getting-started-steps button:hover {
+  border-color: var(--border-strong);
+  background: var(--panel-hover);
+}
+
+.getting-started-steps button > span {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+}
+
+.getting-started-steps strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.getting-started-steps small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.filtered-empty-state {
+  display: grid;
+  justify-items: center;
+  padding: 16px;
+}
+
+.filtered-empty-state .text-button {
+  margin-top: -12px;
+}
+
 @media (max-width: 1050px) {
   .app-frame {
     grid-template-columns: 220px minmax(0, 1fr);
@@ -1775,6 +1995,16 @@
   .banner-art {
     margin-right: -12px;
     transform: scale(0.86);
+  }
+}
+
+@media (max-width: 620px) {
+  .getting-started-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .getting-started-steps button {
+    min-height: 0;
   }
 }
 

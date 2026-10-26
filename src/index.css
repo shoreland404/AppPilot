@@ -1,9 +1,10 @@
 :root {
+  color-scheme: dark;
   font-family: 'DM Sans', 'Segoe UI', sans-serif;
   color: #edf2fa;
   background: #0b0e14;
   font-synthesis: none;
-  text-rendering: optimizeLegibility;
+  text-rendering: auto;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-optical-sizing: auto;
@@ -15,7 +16,7 @@
   --panel-hover: #1a2230;
   --border: rgba(173, 188, 210, 0.1);
   --border-strong: rgba(173, 188, 210, 0.16);
-  --text: #edf2fa;
+  --text: #e4e9f1;
   --muted: #8a95a6;
   --subtle: #5e697a;
   --accent: #8aabff;
@@ -62,9 +63,7 @@ body,
 
 body {
   min-height: 100vh;
-  background:
-    radial-gradient(ellipse at 88% -10%, rgba(71, 95, 164, 0.1), transparent 34rem),
-    var(--bg);
+  background: var(--bg);
   color: var(--text);
 }
 
@@ -106,4 +105,29 @@ button:disabled {
   white-space: nowrap;
   clip-path: inset(50%);
   border: 0;
+}
+
+:root[data-density='compact'] .application-row {
+  min-height: 48px;
+}
+
+:root[data-density='compact'] .application-list {
+  gap: 2px;
+}
+
+:root[data-density='compact'] .data-row {
+  min-height: 54px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

@@ -8,6 +8,7 @@ type PackageStatus = {
   flatpak: boolean
   snap: boolean
   pkexec: boolean
+  winget: boolean
 }
 
 type AppRecord = {
@@ -28,6 +29,7 @@ type Overview = {
   startup_entries: number | null
   running_processes: number | null
   package_status: PackageStatus
+  platform: string
 }
 
 type Dashboard = {
@@ -89,7 +91,21 @@ function getErrorMessage(error: unknown) {
 }
 
 function getInitialTheme(): 'dark' | 'light' {
-  return localStorage.getItem('apppilot-theme') === 'light' ? 'light' : 'dark'
+  const saved = localStorage.getItem('apppilot-theme')
+  if (saved === 'dark' || saved === 'light') return saved
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
+function getInitialCompactMode() {
+  return localStorage.getItem('apppilot-compact-mode') === 'true'
+}
+
+function getInitialGuideVisibility() {
+  return localStorage.getItem('apppilot-guide-dismissed') !== 'true'
+}
+
+function getInitialSortOrder(): 'name-asc' | 'name-desc' {
+  return localStorage.getItem('apppilot-sort-order') === 'name-desc' ? 'name-desc' : 'name-asc'
 }
 
 function getInitialFavorites(): string[] {
@@ -126,12 +142,17 @@ function App() {
   const [favoritesOnly, setFavoritesOnly] = useState(false)
   const [sourceFilter, setSourceFilter] = useState('All sources')
   const [theme, setTheme] = useState<'dark' | 'light'>(getInitialTheme)
+  const [compactMode, setCompactMode] = useState(getInitialCompactMode)
+  const [guideVisible, setGuideVisible] = useState(getInitialGuideVisibility)
+  const [sortOrder, setSortOrder] = useState<'name-asc' | 'name-desc'>(getInitialSortOrder)
   const [loading, setLoading] = useState(nativeRuntime)
   const [pageLoading, setPageLoading] = useState(false)
   const [bulkUpdating, setBulkUpdating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
+  const platform = overview?.platform ?? 'linux'
+  const catalogSearchSequence = useRef(0)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -139,8 +160,17 @@ function App() {
   }, [theme])
 
   useEffect(() => {
+    document.documentElement.dataset.density = compactMode ? 'compact' : 'comfortable'
+    localStorage.setItem('apppilot-compact-mode', String(compactMode))
+  }, [compactMode])
+
+  useEffect(() => {
     localStorage.setItem('apppilot-favorites', JSON.stringify(favoriteAppIds))
   }, [favoriteAppIds])
+
+  useEffect(() => {
+    localStorage.setItem('apppilot-sort-order', sortOrder)
+  }, [sortOrder])
 
   const loadOverview = useCallback(async () => {
     try {
@@ -162,7 +192,11 @@ function App() {
     if (!nativeRuntime || page === 'Overview' || page === 'Applications' || page === 'Settings' || page === 'About') return
     try {
       if (page === 'Discover') {
-        setCatalog(await invoke<FlatpakCatalogEntry[]>('list_flatpak_catalog'))
+        if (platform === 'windows') {
+          setCatalog([])
+        } else {
+          setCatalog(await invoke<FlatpakCatalogEntry[]>('list_flatpak_catalog'))
+        }
       } else if (page === 'Updates') {
         setUpdates(await invoke<PackageUpdate[]>('get_package_updates'))
       } else if (page === 'Startup apps') {
@@ -181,7 +215,7 @@ function App() {
     } finally {
       setPageLoading(false)
     }
-  }, [nativeRuntime, page])
+  }, [nativeRuntime, page, platform])
 
   // Native inventory is an external system effect; browser-only mode never calls its IPC commands.
   useEffect(() => {
@@ -191,9 +225,40 @@ function App() {
 
   // Page data is fetched only after a native navigation target becomes active.
   useEffect(() => {
-    // oxlint-disable-next-line react/set-state-in-effect
-    void loadCurrentPage()
-  }, [loadCurrentPage])
+    if (page === 'Discover' && platform === 'windows') {
+      return
+    }
+    const delay = page === 'Discover' ? 300 : 0
+    const timer = window.setTimeout(() => void loadCurrentPage(), delay)
+    return () => window.clearTimeout(timer)
+  }, [catalogQuery, loadCurrentPage, page, platform])
+
+  useEffect(() => {
+    if (!nativeRuntime || platform !== 'windows' || page !== 'Discover') return
+    if (catalogQuery.trim().length < 2) {
+      return
+    }
+    const requestSequence = ++catalogSearchSequence.current
+    const timer = window.setTimeout(() => {
+      void invoke<FlatpakCatalogEntry[]>('search_package_catalog', { query: catalogQuery })
+        .then((entries) => {
+          if (requestSequence !== catalogSearchSequence.current) return
+          setCatalog(entries)
+          setError(null)
+          setLastRefresh(new Date())
+        })
+        .catch((searchError: unknown) => {
+          if (requestSequence === catalogSearchSequence.current) setError(getErrorMessage(searchError))
+        })
+        .finally(() => {
+          if (requestSequence === catalogSearchSequence.current) setPageLoading(false)
+        })
+    }, 300)
+    return () => {
+      window.clearTimeout(timer)
+      catalogSearchSequence.current += 1
+    }
+  }, [catalogQuery, nativeRuntime, page, platform])
 
   const sources = useMemo(
     () => ['All sources', ...Array.from(new Set(apps.map((app) => app.source))).sort()],
@@ -218,8 +283,11 @@ function App() {
         && matchesCategory
         && matchesFavorite
         && (sourceFilter === 'All sources' || app.source === sourceFilter)
+    }).sort((left, right) => {
+      const comparison = left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+      return sortOrder === 'name-asc' ? comparison : -comparison
     })
-  }, [apps, categoryFilter, favoriteAppIds, favoritesOnly, query, sourceFilter])
+  }, [apps, categoryFilter, favoriteAppIds, favoritesOnly, query, sortOrder, sourceFilter])
   const filteredCatalog = useMemo(() => {
     const normalized = catalogQuery.trim().toLowerCase()
     if (!normalized) return catalog
@@ -230,6 +298,18 @@ function App() {
     )
   }, [catalog, catalogQuery])
   const selectedApp = apps.find((app) => app.id === selectedAppId) ?? null
+  const packageSources = platform === 'windows'
+    ? [{ name: 'WinGet', available: overview?.package_status.winget ?? false }]
+    : [
+      { name: 'APT', available: overview?.package_status.apt ?? false },
+      { name: 'Flatpak', available: overview?.package_status.flatpak ?? false },
+      { name: 'Snap', available: overview?.package_status.snap ?? false },
+    ]
+
+  const dismissGuide = () => {
+    setGuideVisible(false)
+    localStorage.setItem('apppilot-guide-dismissed', 'true')
+  }
 
   const toggleFavorite = (appId: string) => {
     setFavoriteAppIds((current) => current.includes(appId)
@@ -241,6 +321,13 @@ function App() {
     if (page === 'Overview' || page === 'Applications') {
       setLoading(true)
       void loadOverview()
+    } else if (page === 'Discover' && platform === 'windows') {
+      if (catalogQuery.trim().length < 2) return
+      setPageLoading(true)
+      void invoke<FlatpakCatalogEntry[]>('search_package_catalog', { query: catalogQuery })
+        .then((entries) => { setCatalog(entries); setError(null); setLastRefresh(new Date()) })
+        .catch((searchError: unknown) => setError(getErrorMessage(searchError)))
+        .finally(() => setPageLoading(false))
     } else {
       setPageLoading(true)
       void loadCurrentPage()
@@ -251,10 +338,12 @@ function App() {
     setPage(nextPage)
     setError(null)
     setNotice(null)
-    if (nextPage === 'Discover' || nextPage === 'Updates' || nextPage === 'Startup apps' || nextPage === 'Processes') {
+    if (nextPage === 'Discover' && platform === 'windows' && catalogQuery.trim().length < 2) {
+      setPageLoading(false)
+    } else if (nextPage === 'Discover' || nextPage === 'Updates' || nextPage === 'Startup apps' || nextPage === 'Processes') {
       setPageLoading(true)
     }
-  }, [])
+  }, [catalogQuery, platform])
 
   const openApplication = async (app: AppRecord) => {
     try {
@@ -271,10 +360,16 @@ function App() {
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+      const target = event.target
+      const isTyping = target instanceof HTMLElement
+        && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
+      if (((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') || (event.key === '/' && !isTyping)) {
         event.preventDefault()
         navigateTo('Applications')
         searchRef.current?.focus()
+      } else if (event.key === 'Escape' && document.activeElement === searchRef.current) {
+        setQuery('')
+        searchRef.current?.blur()
       }
     }
     window.addEventListener('keydown', handleShortcut)
@@ -343,11 +438,12 @@ function App() {
   }
 
   const updateAllPackages = async () => {
-    if (!window.confirm(`Install all ${updates.length} updates reported by the configured package managers?`)) return
+    const sources = [...new Set(updates.map((update) => update.source))]
+    if (!window.confirm(`Install all ${updates.length} available updates from ${sources.join(', ')}?`)) return
     try {
       setBulkUpdating(true)
       const completed = await invoke<string[]>('update_all_packages')
-      setNotice(completed.length ? `Updated ${completed.length} packages.` : 'No updates were available.')
+      setNotice(completed.length ? `Update completed for: ${completed.join(', ')}.` : 'No updates were available.')
       setError(null)
       await loadCurrentPage()
       await loadOverview()
@@ -425,18 +521,18 @@ function App() {
       <div className="runtime-page">
         <div className="runtime-card">
           <div className="brand-mark large-mark">A</div>
-          <p className="eyebrow">AppPilot for Linux</p>
+          <p className="eyebrow">AppPilot desktop manager</p>
           <h1>Open the native desktop app</h1>
           <p>
-            AppPilot reads your real installed applications and system status. This browser preview does not have access to
-            the Linux desktop or package managers, so no sample data or simulated actions are shown.
+            AppPilot reads installed applications and system status from your computer. This browser preview does not have
+            access to desktop package managers, so no sample data or simulated actions are shown.
           </p>
           <div className="runtime-command">
             <span>From the project folder, run</span>
             <code>npm run tauri:dev</code>
           </div>
           <p className="runtime-footnote">
-            If startup fails, install the Linux Tauri dependencies listed in the README and try again.
+            If startup fails, install the native prerequisites for your operating system listed in the README and try again.
           </p>
         </div>
       </div>
@@ -450,7 +546,7 @@ function App() {
           <span className="brand-mark">A</span>
           <span className="brand-copy">
             <strong>AppPilot</strong>
-            <small>Linux app manager</small>
+            <small>{platform === 'windows' ? 'Windows app manager' : 'Linux app manager'}</small>
           </span>
         </a>
 
@@ -490,22 +586,15 @@ function App() {
         <div className="sidebar-bottom">
           <div className="source-card">
             <div className="source-card-heading">
-              <span className="status-dot" />
+                <span className={`status-dot${packageSources.some((source) => source.available) ? '' : ' unavailable'}`} />
               <span>Package sources</span>
             </div>
             <div className="source-chips">
-              {(['APT', 'Flatpak', 'Snap'] as const).map((source) => {
-                const isAvailable = source === 'APT'
-                  ? overview?.package_status.apt
-                  : source === 'Flatpak'
-                    ? overview?.package_status.flatpak
-                    : overview?.package_status.snap
-                return (
-                  <span className={`source-chip${isAvailable ? ' available' : ''}`} key={source}>
-                    <i />{source}
+              {packageSources.map((source) => (
+                  <span className={`source-chip${source.available ? ' available' : ''}`} key={source.name}>
+                    <i />{source.name}
                   </span>
-                )
-              })}
+              ))}
             </div>
           </div>
           <div className="sidebar-footnote">No background scans or telemetry</div>
@@ -526,7 +615,7 @@ function App() {
                 value={query}
                 onChange={(event) => { setQuery(event.target.value); if (page !== 'Applications') navigateTo('Applications') }}
               />
-              <kbd>Ctrl K</kbd>
+              <kbd>Ctrl K /</kbd>
             </label>
             <button aria-label="Refresh data" className="icon-button" disabled={loading || pageLoading} onClick={refresh} type="button">
               <span className={loading || pageLoading ? 'spinning' : ''}>↻</span>
@@ -552,6 +641,20 @@ function App() {
             </div>
           ) : null}
 
+          {guideVisible && page === 'Overview' ? (
+            <section aria-label="Getting started" className="getting-started">
+              <div className="getting-started-heading">
+                <div><span className="eyebrow">A QUICK START</span><h2>Everything you need, in one place.</h2></div>
+                <button aria-label="Dismiss getting started guide" className="icon-button" onClick={dismissGuide} type="button">×</button>
+              </div>
+              <div className="getting-started-steps">
+                <button onClick={() => navigateTo('Applications')} type="button"><span>01</span><strong>Open an app</strong><small>Find software already on your computer.</small></button>
+                <button onClick={() => navigateTo('Discover')} type="button"><span>02</span><strong>Find something new</strong><small>Search your configured software sources.</small></button>
+                <button onClick={() => navigateTo('Updates')} type="button"><span>03</span><strong>Stay up to date</strong><small>Review available updates before installing.</small></button>
+              </div>
+            </section>
+          ) : null}
+
           {page === 'Overview' ? (
             <OverviewPage
               apps={apps}
@@ -559,6 +662,7 @@ function App() {
               loading={loading}
               overview={overview}
               lastRefresh={lastRefresh}
+              platform={platform}
               onNavigate={navigateTo}
               onSelectApp={(app) => { setSelectedAppId(app.id); navigateTo('Applications') }}
             />
@@ -579,6 +683,7 @@ function App() {
               categoryFilter={categoryFilter}
               favoritesOnly={favoritesOnly}
               favoriteAppIds={favoriteAppIds}
+              wingetAvailable={overview?.package_status.winget ?? false}
               onFilter={setSourceFilter}
               onCategoryFilter={setCategoryFilter}
               onToggleFavorites={() => setFavoritesOnly((current) => !current)}
@@ -588,17 +693,32 @@ function App() {
               onUpdate={updateApplication}
               onQuery={setQuery}
               onSelect={setSelectedAppId}
+              sortOrder={sortOrder}
+              onSortOrder={setSortOrder}
+              onClearFilters={() => { setQuery(''); setSourceFilter('All sources'); setCategoryFilter('All categories'); setFavoritesOnly(false) }}
             />
           ) : null}
 
           {page === 'Discover' ? (
             <DiscoverPage
               canInstallSystem={overview?.package_status.pkexec ?? false}
+              platform={platform}
+              packageAvailable={platform === 'windows'
+                ? overview?.package_status.winget ?? false
+                : overview?.package_status.flatpak ?? false}
               entries={filteredCatalog}
               loading={pageLoading}
               query={catalogQuery}
               onInstall={installCatalogApp}
-              onQuery={setCatalogQuery}
+              onQuery={(value) => {
+                setCatalogQuery(value)
+                if (platform === 'windows' && value.trim().length < 2) {
+                  setCatalog([])
+                  setPageLoading(false)
+                } else {
+                  setPageLoading(true)
+                }
+              }}
             />
           ) : null}
 
@@ -607,21 +727,28 @@ function App() {
           ) : null}
 
           {page === 'Startup apps' ? (
-            <StartupPage entries={startupEntries} error={error} loading={pageLoading} onToggle={toggleStartupEntry} />
+            <StartupPage entries={startupEntries} error={error} loading={pageLoading} platform={platform} onToggle={toggleStartupEntry} />
           ) : null}
 
           {page === 'Processes' ? (
-            <ProcessesPage error={error} processes={processes} loading={pageLoading} onStop={stopProcess} />
+            <ProcessesPage error={error} processes={processes} loading={pageLoading} platform={platform} onStop={stopProcess} />
           ) : null}
 
           {page === 'Settings' ? (
-            <SettingsPage theme={theme} packageStatus={overview?.package_status ?? null} onTheme={toggleTheme} />
+            <SettingsPage
+              theme={theme}
+              compactMode={compactMode}
+              packageStatus={overview?.package_status ?? null}
+              platform={platform}
+              onTheme={toggleTheme}
+              onCompactMode={() => setCompactMode((current) => !current)}
+            />
           ) : null}
 
-          {page === 'About' ? <AboutPage /> : null}
+          {page === 'About' ? <AboutPage platform={platform} /> : null}
 
           <footer className="page-footer">
-            <span>AppPilot <span className="footer-version">v0.1.0</span></span>
+            <span>AppPilot <span className="footer-version">v0.2.0</span></span>
             <span>{lastRefresh ? `Last refreshed ${lastRefresh.toLocaleTimeString()}` : 'Waiting for the desktop system'}</span>
           </footer>
         </div>
@@ -649,13 +776,14 @@ function PageHeading({ eyebrow, title, description, action }: {
 }
 
 function OverviewPage({
-  apps, error, loading, overview, lastRefresh, onNavigate, onSelectApp,
+  apps, error, loading, overview, lastRefresh, platform, onNavigate, onSelectApp,
 }: {
   apps: AppRecord[]
   error: string | null
   loading: boolean
   overview: Overview | null
   lastRefresh: Date | null
+  platform: string
   onNavigate: (page: Page) => void
   onSelectApp: (app: AppRecord) => void
 }) {
@@ -664,7 +792,7 @@ function OverviewPage({
       <PageHeading
         eyebrow="YOUR DESKTOP, AT A GLANCE"
         title="Good to see you."
-        description="A clear view of the applications and services on this Linux system."
+        description={`A clear view of the applications and software sources on this ${platform === 'windows' ? 'Windows' : 'Linux'} system.`}
         action={<span className="live-badge"><i />Live system data</span>}
       />
       <section className="welcome-banner">
@@ -690,14 +818,14 @@ function OverviewPage({
         {lastRefresh ? <span className="updated-label">Updated {lastRefresh.toLocaleTimeString()}</span> : null}
       </div>
       <section aria-label="System overview" className="metric-grid">
-        <MetricCard label="Installed apps" value={loading ? null : overview?.installed_applications ?? null} loading={loading} icon="▦" detail="Desktop launchers found" tone="blue" />
+        <MetricCard label="Installed apps" value={loading ? null : overview?.installed_applications ?? null} loading={loading} icon="▦" detail="Applications found on this device" tone="blue" />
         <MetricCard label="Startup apps" value={loading ? null : overview?.startup_entries ?? null} loading={loading} icon="◷" detail="Scanned when you open this page" tone="violet" />
         <MetricCard label="Running processes" value={loading ? null : overview?.running_processes ?? null} loading={loading} icon="⌘" detail="Scanned when you open this page" tone="green" />
       </section>
 
       <section className="section-block">
         <div className="section-title-row">
-          <div><h2>Recently available</h2><p>Applications discovered on this system</p></div>
+          <div><h2>Installed applications</h2><p>Applications discovered on this system</p></div>
           <button className="text-button" onClick={() => onNavigate('Applications')} type="button">View all <span>→</span></button>
         </div>
         {loading ? <LoadingState label="Reading installed desktop applications…" /> : error ? (
@@ -745,13 +873,14 @@ function MetricCard({ label, value, icon, detail, tone, loading }: {
 }
 
 function ApplicationsPage({
-  apps, allApps, error, loading, query, selectedApp, selectedId, sources, sourceFilter,
-  categories, categoryFilter, favoritesOnly, favoriteAppIds,
+  apps, allApps, wingetAvailable, error, loading, query, selectedApp, selectedId, sources, sourceFilter,
+  categories, categoryFilter, favoritesOnly, favoriteAppIds, sortOrder, onSortOrder, onClearFilters, platform,
   onFilter, onLaunch, onManage, onQuery, onSelect, onUpdate,
   onCategoryFilter, onToggleFavorites, onToggleFavorite,
 }: {
   apps: AppRecord[]
   allApps: AppRecord[]
+  wingetAvailable: boolean
   error: string | null
   loading: boolean
   query: string
@@ -763,6 +892,10 @@ function ApplicationsPage({
   categoryFilter: string
   favoritesOnly: boolean
   favoriteAppIds: string[]
+  sortOrder: 'name-asc' | 'name-desc'
+  onSortOrder: (order: 'name-asc' | 'name-desc') => void
+  onClearFilters: () => void
+  platform: string
   onFilter: (source: string) => void
   onCategoryFilter: (category: string) => void
   onToggleFavorites: () => void
@@ -775,7 +908,7 @@ function ApplicationsPage({
 }) {
   return (
     <>
-      <PageHeading eyebrow="SOFTWARE LIBRARY" title="Applications" description="Installed applications discovered from your Linux desktop launchers." />
+      <PageHeading eyebrow="SOFTWARE LIBRARY" title="Applications" description={`Installed applications discovered on this ${platform === 'windows' ? 'Windows' : 'Linux'} computer.`} />
       <section className="library-card">
         <div className="library-toolbar">
           <div className="library-count">{loading ? 'Scanning…' : `${apps.length} ${apps.length === 1 ? 'application' : 'applications'}`}</div>
@@ -796,6 +929,13 @@ function ApplicationsPage({
                 {categories.map((category) => <option key={category} value={category}>{category}</option>)}
               </select>
             </label>
+            <label className="select-control">
+              <span className="sr-only">Sort applications</span>
+              <select onChange={(event) => onSortOrder(event.target.value as 'name-asc' | 'name-desc')} value={sortOrder}>
+                <option value="name-asc">Name: A to Z</option>
+                <option value="name-desc">Name: Z to A</option>
+              </select>
+            </label>
             <button
               aria-pressed={favoritesOnly}
               className={`secondary-button favorites-filter${favoritesOnly ? ' active' : ''}`}
@@ -811,7 +951,19 @@ function ApplicationsPage({
             {loading ? <LoadingState label="Scanning your application launchers…" /> : error ? (
               <EmptyState title="Application inventory is unavailable" description="Resolve the backend error above and refresh the scan." />
             ) : apps.length === 0 ? (
-              <EmptyState title={allApps.length === 0 ? 'Nothing to show yet' : 'No matching applications'} description={allApps.length === 0 ? 'No desktop launchers were found in the standard application folders.' : 'Try another search or source filter.'} />
+              <div className="filtered-empty-state">
+                <EmptyState
+                  title={allApps.length === 0
+                    ? platform === 'windows' && !wingetAvailable ? 'WinGet is not available yet' : 'Nothing to show yet'
+                    : 'No matching applications'}
+                  description={allApps.length === 0
+                    ? platform === 'windows' && !wingetAvailable
+                      ? "Install or update 'App Installer' from Microsoft Store, then refresh AppPilot to manage Windows applications."
+                      : 'No installed applications were reported by the available package source.'
+                    : 'Try another search or source filter.'}
+                />
+                {allApps.length > 0 ? <button className="text-button" onClick={onClearFilters} type="button">Clear all filters</button> : null}
+              </div>
             ) : apps.map((app) => (
               <button
                 aria-pressed={selectedId === app.id}
@@ -840,7 +992,7 @@ function ApplicationsPage({
                 <div><dt>Package</dt><dd>{selectedApp.package_name ?? 'Not identified'}</dd></div>
                 {selectedApp.package_scope ? <div><dt>Install scope</dt><dd>{selectedApp.package_scope}</dd></div> : null}
                 <div><dt>Category</dt><dd>{selectedApp.category || 'Uncategorized'}</dd></div>
-                <div><dt>Launcher file</dt><dd className="path-value" title={selectedApp.path}>{selectedApp.path}</dd></div>
+                <div><dt>{selectedApp.source === 'WinGet' ? 'Package source' : 'Launcher file'}</dt><dd className="path-value" title={selectedApp.path}>{selectedApp.path}</dd></div>
               </dl>
               <button className="primary-button launch-button" onClick={() => onLaunch(selectedApp)} type="button">
                 <span>▶</span> Launch application
@@ -854,7 +1006,7 @@ function ApplicationsPage({
                 <span aria-hidden="true">{favoriteAppIds.includes(selectedApp.id) ? '★' : '☆'}</span>
                 {favoriteAppIds.includes(selectedApp.id) ? 'Remove from favorites' : 'Add to favorites'}
               </button>
-              {selectedApp.package_name && ['APT', 'Flatpak', 'Snap'].includes(selectedApp.source) ? (
+              {selectedApp.package_name && ['APT', 'Flatpak', 'Snap', 'WinGet'].includes(selectedApp.source) ? (
                 <div className="detail-actions">
                   <button className="secondary-button" onClick={() => onUpdate(selectedApp)} type="button">Check for update</button>
                   <button className="danger-link" onClick={() => onManage(selectedApp)} type="button">Uninstall</button>
@@ -871,7 +1023,7 @@ function ApplicationsPage({
 }
 
 function DiscoverPage({
-  canInstallSystem, entries, loading, query, onInstall, onQuery,
+  canInstallSystem, entries, loading, query, onInstall, onQuery, platform, packageAvailable,
 }: {
   canInstallSystem: boolean
   entries: FlatpakCatalogEntry[]
@@ -879,18 +1031,23 @@ function DiscoverPage({
   query: string
   onInstall: (entry: FlatpakCatalogEntry) => void
   onQuery: (query: string) => void
+  platform: string
+  packageAvailable: boolean
 }) {
+  const isWindows = platform === 'windows'
   return (
     <>
       <PageHeading
         eyebrow="SOFTWARE CATALOGUE"
         title="Discover"
-        description="Browse applications from Flatpak remotes configured on this computer."
+        description={isWindows
+          ? 'Search the live WinGet catalogue and install a verified package for your account.'
+          : 'Browse applications from Flatpak remotes configured on this computer.'}
       />
       <section className="content-card">
         <div className="catalog-toolbar">
           <div className="list-heading">
-            <div><h2>Available applications</h2><p>Only results reported by your configured Flatpak remotes are shown.</p></div>
+            <div><h2>Available applications</h2><p>{isWindows ? 'Search by app name or package ID. Results come directly from WinGet.' : 'Only results reported by your configured Flatpak remotes are shown.'}</p></div>
             <span className="result-count">{loading ? '…' : entries.length}</span>
           </div>
           <label className="catalog-search">
@@ -898,18 +1055,24 @@ function DiscoverPage({
             <input
               aria-label="Search available applications"
               onChange={(event) => onQuery(event.target.value)}
-              placeholder="Search name, description or app ID"
+              placeholder={isWindows ? 'Type at least 2 letters to search WinGet' : 'Search name, description or app ID'}
               type="search"
               value={query}
             />
           </label>
         </div>
-        {loading ? <LoadingState label="Checking configured Flatpak remotes…" /> : entries.length === 0 ? (
+        {loading ? <LoadingState label={isWindows ? 'Searching WinGet…' : 'Checking configured Flatpak remotes…'} /> : entries.length === 0 ? (
           <EmptyState
-            title={query ? 'No matching applications' : 'No applications found in your Flatpak remotes'}
-            description={query
-              ? 'Try a different name or application ID.'
-              : 'Install Flatpak and add an application remote such as Flathub, then refresh this page.'}
+            title={isWindows && !packageAvailable
+              ? 'WinGet is not available yet'
+              : query ? 'No matching applications' : isWindows ? 'Search for an application to begin' : 'No applications found in your Flatpak remotes'}
+            description={isWindows && !packageAvailable
+              ? "Install or update 'App Installer' from Microsoft Store, then refresh this page."
+              : query
+              ? 'Try a different name or package ID.'
+              : isWindows
+                ? 'Enter at least two letters above. AppPilot only shows packages returned by the configured WinGet sources.'
+                : 'Install Flatpak and add an application remote such as Flathub, then refresh this page.'}
           />
         ) : (
           <div className="catalog-list">
@@ -963,7 +1126,7 @@ function UpdatesPage({ updates, loading, error, onUpdate, onUpdateAll }: {
         action={updates.length > 0 ? <button className="primary-button" disabled={loading} onClick={onUpdateAll} type="button">Update all ({updates.length})</button> : undefined}
       />
       <section className="content-card">
-        <div className="list-heading"><div><h2>Available updates</h2><p>Read directly from APT, Flatpak and Snap.</p></div><span className="result-count">{loading ? 'Checking…' : updates.length}</span></div>
+        <div className="list-heading"><div><h2>Available updates</h2><p>Read directly from {updates.some((update) => update.source === 'WinGet') ? 'WinGet' : 'APT, Flatpak and Snap'}.</p></div><span className="result-count">{loading ? 'Checking…' : updates.length}</span></div>
         {loading ? <LoadingState label="Checking configured package sources…" /> : error ? (
           <EmptyState title="Update check is unavailable" description="Resolve the package-manager error above and refresh the check." />
         ) : updates.length === 0 ? (
@@ -985,21 +1148,24 @@ function UpdatesPage({ updates, loading, error, onUpdate, onUpdateAll }: {
   )
 }
 
-function StartupPage({ entries, loading, error, onToggle }: {
+function StartupPage({ entries, loading, error, onToggle, platform }: {
   entries: StartupEntry[]
   loading: boolean
   error: string | null
   onToggle: (entry: StartupEntry) => void
+  platform: string
 }) {
   return (
     <>
-      <PageHeading eyebrow="SESSION CONFIGURATION" title="Startup apps" description="Inspect startup entries and control user-owned launchers. System entries are read-only." />
+      <PageHeading eyebrow="SESSION CONFIGURATION" title="Startup apps" description={platform === 'windows'
+        ? 'Inspect shortcuts launched when you sign in. Only shortcuts in your personal Startup folder can be changed.'
+        : 'Inspect startup entries and control user-owned launchers. System entries are read-only.'} />
       <section className="content-card">
-        <div className="list-heading"><div><h2>Session startup</h2><p>Read from your user and system autostart folders.</p></div><span className="result-count">{loading ? '…' : entries.length}</span></div>
+        <div className="list-heading"><div><h2>Session startup</h2><p>{platform === 'windows' ? 'Read from your personal and shared Startup folders.' : 'Read from your user and system autostart folders.'}</p></div><span className="result-count">{loading ? '…' : entries.length}</span></div>
         {loading ? <LoadingState label="Reading autostart entries…" /> : error ? (
           <EmptyState title="Startup inventory is unavailable" description="Resolve the backend error above and refresh the scan." />
         ) : entries.length === 0 ? (
-          <EmptyState title="No startup applications found" description="There are no enabled autostart desktop entries in the standard XDG locations." />
+          <EmptyState title="No startup applications found" description={platform === 'windows' ? 'No shortcuts were found in the standard Windows Startup folders.' : 'There are no enabled autostart desktop entries in the standard XDG locations.'} />
         ) : (
           <div className="data-list">
             {entries.map((entry) => (
@@ -1020,21 +1186,24 @@ function StartupPage({ entries, loading, error, onToggle }: {
   )
 }
 
-function ProcessesPage({ processes, loading, error, onStop }: {
+function ProcessesPage({ processes, loading, error, onStop, platform }: {
   processes: ProcessInfo[]
   loading: boolean
   error: string | null
   onStop: (process: ProcessInfo) => void
+  platform: string
 }) {
   return (
     <>
-      <PageHeading eyebrow="LIVE SYSTEM ACTIVITY" title="Processes" description="Processes currently visible to your user, read from the Linux /proc filesystem." />
+      <PageHeading eyebrow="LIVE SYSTEM ACTIVITY" title="Processes" description={platform === 'windows'
+        ? 'Processes visible to your account, with owner checks before a stop request is allowed.'
+        : 'Processes currently visible to your user, read from the Linux /proc filesystem.'} />
       <section className="content-card">
         <div className="list-heading"><div><h2>Running processes</h2><p>Resident memory is reported by the kernel.</p></div><span className="result-count">{loading ? '…' : processes.length}</span></div>
         {loading ? <LoadingState label="Reading live process information…" /> : error ? (
           <EmptyState title="Process information is unavailable" description="Resolve the system access error above and refresh the scan." />
         ) : processes.length === 0 ? (
-          <EmptyState title="No process information available" description="AppPilot could not read any process entries from /proc." />
+          <EmptyState title="No process information available" description={platform === 'windows' ? 'AppPilot could not read any process entries visible to your account.' : 'AppPilot could not read any process entries from /proc.'} />
         ) : (
           <div className="process-table-wrap">
             <table className="process-table">
@@ -1058,11 +1227,21 @@ function ProcessesPage({ processes, loading, error, onStop }: {
   )
 }
 
-function SettingsPage({ theme, packageStatus, onTheme }: {
+function SettingsPage({ theme, compactMode, packageStatus, platform, onTheme, onCompactMode }: {
   theme: 'dark' | 'light'
+  compactMode: boolean
   packageStatus: PackageStatus | null
+  platform: string
   onTheme: () => void
+  onCompactMode: () => void
 }) {
+  const integrations: [string, boolean | undefined][] = platform === 'windows'
+    ? [['WinGet', packageStatus?.winget]]
+    : [
+      ['APT', packageStatus?.apt],
+      ['Flatpak', packageStatus?.flatpak],
+      ['Snap', packageStatus?.snap],
+    ]
   return (
     <>
       <PageHeading eyebrow="APP PREFERENCES" title="Settings" description="Tune the AppPilot desktop experience and inspect system integrations." />
@@ -1072,13 +1251,17 @@ function SettingsPage({ theme, packageStatus, onTheme }: {
           <div className="setting-copy"><h2>Appearance</h2><p>Choose a comfortable look for your desktop session.</p></div>
           <button aria-pressed={theme === 'light'} className="toggle-control" onClick={onTheme} type="button"><span />{theme === 'dark' ? 'Dark theme' : 'Light theme'}</button>
         </div>
+        <div className="content-card setting-card">
+          <div className="setting-symbol">≡</div>
+          <div className="setting-copy"><h2>Library spacing</h2><p>Fit more application rows on screen without reducing text size.</p></div>
+          <button aria-pressed={compactMode} className="toggle-control" onClick={onCompactMode} type="button"><span />{compactMode ? 'Compact' : 'Comfortable'}</button>
+        </div>
         <div className="content-card integration-card">
           <div className="list-heading"><div><h2>Package integrations</h2><p>Availability detected from executable paths.</p></div></div>
-          {(['APT', 'Flatpak', 'Snap'] as const).map((source) => {
-            const available = source === 'APT' ? packageStatus?.apt : source === 'Flatpak' ? packageStatus?.flatpak : packageStatus?.snap
-            return <div className="integration-row" key={source}><span>{source}</span><span className={available ? 'integration-status online' : 'integration-status'}><i />{available ? 'Available' : 'Not installed'}</span></div>
-          })}
-          <div className="integration-row"><span>Privilege prompt</span><span className={packageStatus?.pkexec ? 'integration-status online' : 'integration-status'}><i />{packageStatus?.pkexec ? 'pkexec available' : 'pkexec unavailable'}</span></div>
+          {integrations.map(([source, available]) => (
+            <div className="integration-row" key={source}><span>{source}</span><span className={available ? 'integration-status online' : 'integration-status'}><i />{available ? 'Available' : 'Not installed'}</span></div>
+          ))}
+          {platform !== 'windows' ? <div className="integration-row"><span>Privilege prompt</span><span className={packageStatus?.pkexec ? 'integration-status online' : 'integration-status'}><i />{packageStatus?.pkexec ? 'pkexec available' : 'pkexec unavailable'}</span></div> : null}
         </div>
         <div className="content-card privacy-card">
           <span className="privacy-icon">◎</span><div><h2>Privacy by design</h2><p>Application inventory, process details and package actions stay on this computer. AppPilot does not send telemetry.</p></div>
@@ -1088,15 +1271,17 @@ function SettingsPage({ theme, packageStatus, onTheme }: {
   )
 }
 
-function AboutPage() {
+function AboutPage({ platform }: { platform: string }) {
   return (
     <>
-      <PageHeading eyebrow="ABOUT THIS APPLICATION" title="AppPilot" description="A native Linux desktop application manager, built to keep system data local and actions transparent." />
+      <PageHeading eyebrow="ABOUT THIS APPLICATION" title="AppPilot" description="A native desktop application manager, built to keep system data local and actions transparent." />
       <section className="about-card content-card">
-        <div className="about-brand"><span className="brand-mark large-mark">A</span><div><h2>AppPilot</h2><p>Linux app manager · Version 0.1.0</p></div></div>
-        <p>AppPilot discovers launchers installed on this Linux desktop, shows package-source integrations available on this system and provides clear access to startup entries, running processes and package updates.</p>
-        <div className="about-facts"><div><span>Desktop shell</span><strong>Tauri 2</strong></div><div><span>Interface</span><strong>React + TypeScript</strong></div><div><span>Native layer</span><strong>Rust · Linux</strong></div></div>
-        <p className="about-note">Package actions are limited to packages AppPilot can identify from local system metadata. Privileged operations require the system authorization prompt.</p>
+        <div className="about-brand"><span className="brand-mark large-mark">A</span><div><h2>AppPilot</h2><p>{platform === 'windows' ? 'Windows app manager' : 'Linux app manager'} · Version 0.2.0</p></div></div>
+        <p>AppPilot discovers installed applications, shows package-source integrations available on this system and provides clear access to startup entries, running processes and package updates.</p>
+        <div className="about-facts"><div><span>Desktop shell</span><strong>Tauri 2</strong></div><div><span>Interface</span><strong>React + TypeScript</strong></div><div><span>Native layer</span><strong>Rust · {platform === 'windows' ? 'Windows' : 'Linux'}</strong></div></div>
+        <p className="about-note">{platform === 'windows'
+          ? 'Windows package actions use exact WinGet identifiers and run in the current user context.'
+          : 'Package actions are limited to packages AppPilot can identify from local system metadata. Privileged operations require the system authorization prompt.'}</p>
       </section>
     </>
   )

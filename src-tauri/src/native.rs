@@ -28,6 +28,7 @@ pub struct PackageManagerStatus {
     pub flatpak: bool,
     pub snap: bool,
     pub pkexec: bool,
+    pub winget: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -36,6 +37,7 @@ pub struct AppOverview {
     pub startup_entries: Option<usize>,
     pub running_processes: Option<usize>,
     pub package_status: PackageManagerStatus,
+    pub platform: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +122,7 @@ fn get_dashboard_data_impl() -> Result<DashboardData, String> {
             startup_entries: None,
             running_processes: None,
             package_status: detect_package_managers(),
+            platform: "linux".to_string(),
         },
         applications,
     })
@@ -549,6 +552,26 @@ fn list_flatpak_catalog_impl() -> Result<Vec<FlatpakCatalogEntry>, String> {
             .then(left.app_id.cmp(&right.app_id))
             .then(left.scope.cmp(&right.scope))
     });
+    Ok(catalog)
+}
+
+#[tauri::command]
+async fn search_package_catalog(query: String) -> Result<Vec<FlatpakCatalogEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || search_package_catalog_impl(query))
+        .await
+        .map_err(|error| format!("application search task failed: {error}"))?
+}
+
+fn search_package_catalog_impl(query: String) -> Result<Vec<FlatpakCatalogEntry>, String> {
+    let query = query.trim().to_lowercase();
+    let mut catalog = list_flatpak_catalog_impl()?;
+    if !query.is_empty() {
+        catalog.retain(|entry| {
+            entry.name.to_lowercase().contains(&query)
+                || entry.app_id.to_lowercase().contains(&query)
+                || entry.description.to_lowercase().contains(&query)
+        });
+    }
     Ok(catalog)
 }
 
@@ -1365,6 +1388,7 @@ fn detect_package_managers() -> PackageManagerStatus {
         flatpak: executable_in_path("flatpak"),
         snap: executable_in_path("snap"),
         pkexec: executable_in_path("pkexec"),
+        winget: false,
     }
 }
 
@@ -1411,6 +1435,7 @@ pub fn run() {
             get_package_updates,
             update_all_packages,
             list_flatpak_catalog,
+            search_package_catalog,
             install_flatpak_application,
             set_startup_entry_enabled,
             terminate_process,
